@@ -7,6 +7,7 @@ from app.schemas.run import RunRequest
 from pipeline.fetch import fetch_all
 from pipeline.map_flood import map_flood
 from pipeline.map_damage import map_damage
+from pipeline.map_cutoff import map_cutoff
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 registry = RunRegistry(settings.runs_dir)
@@ -55,3 +56,12 @@ def damage_run(run_id: str, bg: BackgroundTasks):
     req = json.loads(req_path.read_text())
     bg.add_task(map_damage, run_id, req["bbox"])
     return {"run_id": run_id, "status": "damage_started"}
+
+@router.post("/{run_id}/cutoff")
+def cutoff_run(run_id: str, bg: BackgroundTasks):
+    req_path = settings.runs_dir / run_id / "request.json"
+    if not req_path.exists():
+        raise HTTPException(404, "run not found")
+    req = json.loads(req_path.read_text())
+    bg.add_task(map_cutoff, run_id, req["bbox"])
+    return {"run_id": run_id, "status": "cutoff_started"}
