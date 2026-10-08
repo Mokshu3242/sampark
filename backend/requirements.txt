@@ -17,5 +17,4 @@ pysheds==0.5
 openeo
 requests==2.32.3
 
-# copilot
-google-genai
+openai==1.51.0

@@ -1,0 +1,18 @@
+1. Create the account
+
+Go to dataspace.copernicus.eu
+Click Login, then Register
+Fill in the form and confirm your email
+
+2. Test the openEO login. With your backend venv active:
+
+powershell
+cd backend
+.venv\Scripts\Activate.ps1
+python -c "import openeo; c = openeo.connect('openeo.dataspace.copernicus.eu').authenticate_oidc(); print(c.describe_account())"
+
+It will print a link and a code. Open the link, log in with your CDSE account, and approve. Then the terminal should print your account info.
+
+After this first login, the token is saved on your laptop. Future runs won't ask again.
+
+3. Check the free credits. On the openEO web editor (openeo.dataspace.copernicus.eu), your account shows a credit balance. Free accounts get monthly credits, which is plenty for this project if we only process small areas.
