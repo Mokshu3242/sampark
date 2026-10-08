@@ -19,7 +19,8 @@ class Settings(BaseSettings):
     llm_order: str = "groq,cloudflare,gemini"
 
     groq_api_key: str = ""
-    groq_model: str = "llama-3.3-70b-versatile"
+    groq_small_model: str = "openai/gpt-oss-20b"
+    
 
     cf_account_id: str = ""
     cf_auth_token: str = ""
@@ -32,7 +33,7 @@ class Settings(BaseSettings):
 
     def available_llms(self) -> list[str]:
         has_key = {
-            "groq": bool(self.groq_api_key),
+            "groq_small": bool(self.groq_api_key),
             "cloudflare": bool(self.cf_account_id and self.cf_auth_token),
             "gemini": bool(self.gemini_api_key),
         }

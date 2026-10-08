@@ -9,6 +9,20 @@ from pipeline.map_flood import map_flood
 from pipeline.map_damage import map_damage
 from pipeline.map_cutoff import map_cutoff
 
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from copilot.agent import ask as copilot_ask
+from copilot.report import generate as generate_report
+
+class ChatRequest(BaseModel):
+    question: str
+    language: str = "auto"   # "en", "ne", or "auto"
+
+
+class ReportRequest(BaseModel):
+    language: str = "en"
+
 router = APIRouter(prefix="/runs", tags=["runs"])
 registry = RunRegistry(settings.runs_dir)
 
@@ -65,3 +79,24 @@ def cutoff_run(run_id: str, bg: BackgroundTasks):
     req = json.loads(req_path.read_text())
     bg.add_task(map_cutoff, run_id, req["bbox"])
     return {"run_id": run_id, "status": "cutoff_started"}
+
+@router.post("/{run_id}/chat")
+def chat(run_id: str, body: ChatRequest):
+    run_dir = settings.runs_dir / run_id
+    if not run_dir.exists():
+        raise HTTPException(404, "run not found")
+    if not body.question.strip():
+        raise HTTPException(400, "question required")
+    return copilot_ask(body.question.strip(), run_dir, language=body.language)
+
+@router.post("/{run_id}/report")
+def make_report(run_id: str, body: ReportRequest):
+    run_dir = settings.runs_dir / run_id
+    if not run_dir.exists():
+        raise HTTPException(404, "run not found")
+    if body.language not in ("en", "ne"):
+        raise HTTPException(400, "language must be en or ne")
+    out = generate_report(run_id, run_dir, body.language)
+    if out["pdf"]:
+        return FileResponse(str(out["pdf"]), media_type="application/pdf", filename=out["pdf"].name)
+    return FileResponse(str(out["html"]), media_type="text/html", filename=out["html"].name)

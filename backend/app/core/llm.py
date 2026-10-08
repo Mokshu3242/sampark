@@ -1,5 +1,7 @@
+import json
 import logging
 import time
+
 import requests
 
 from app.core.config import settings
@@ -7,11 +9,24 @@ from app.core.config import settings
 log = logging.getLogger("flood-watch.llm")
 
 # Errors where retrying the same provider won't help
-PERMANENT_HINTS = ("daily", "quota", "404", "403", "not_found", "suspended", "empty answer")
+PERMANENT_HINTS = ("daily", "quota", "404", "403", "not_found", "suspended", "empty answer", "tool_use_failed")
 
 
 class LLMError(RuntimeError):
     pass
+
+
+def _as_text(content) -> str:
+    """Providers sometimes return parsed JSON or a list of parts instead of a string."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and all(isinstance(p, dict) and "text" in p for p in content):
+        return "".join(p["text"] for p in content)
+    if isinstance(content, (dict, list)):
+        return json.dumps(content, ensure_ascii=False)
+    return str(content)
 
 
 class Provider:
@@ -31,37 +46,46 @@ class OpenAIStyle(Provider):
         self.model = model
 
     def chat(self, messages: list[dict], temperature: float, max_tokens: int) -> str:
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        # Reasoning models: keep thinking short so the answer isn't cut off
-        if "gpt-oss" in self.model:
-            payload["reasoning_effort"] = "low"
+        last_err = f"{self.name} returned an empty answer"
+        # If the model runs out of room (reasoning models think first), retry once with double the budget
+        for budget in (max_tokens, max_tokens * 2):
+            payload = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": budget,
+            }
 
-        try:
-            resp = requests.post(
-                self.url,
-                headers={"Authorization": f"Bearer {self.key}"},
-                json=payload,
-                timeout=60,
-            )
-        except requests.RequestException as e:
-            raise LLMError(f"{self.name} network error: {e}") from e
+            if "gpt-oss" in self.model:
+                payload["reasoning_effort"] = "low"
+                # JSON mode only when the prompt asks for JSON (Groq requires the word "json")
+                if any("json" in (m.get("content") or "").lower() for m in messages):
+                    payload["response_format"] = {"type": "json_object"}
 
-        if resp.status_code != 200:
-            raise LLMError(f"{self.name} HTTP {resp.status_code}: {resp.text[:300]}")
+            try:
+                resp = requests.post(self.url, headers={"Authorization": f"Bearer {self.key}"},
+                                     json=payload, timeout=90)
+            except requests.RequestException as e:
+                raise LLMError(f"{self.name} network error: {e}") from e
+            
+            if resp.status_code != 200:
+                raise LLMError(f"{self.name} HTTP {resp.status_code}: {resp.text[:300]}")
 
-        try:
-            content = resp.json()["choices"][0]["message"].get("content") or ""
-        except (ValueError, KeyError, IndexError) as e:
-            raise LLMError(f"{self.name} bad response shape: {e}") from e
+            try:
+                choice = resp.json()["choices"][0]
+            except (ValueError, KeyError, IndexError) as e:
+                raise LLMError(f"{self.name} bad response shape: {e}") from e
 
-        if not content.strip():
-            raise LLMError(f"{self.name} returned an empty answer")
-        return content
+            content = _as_text((choice.get("message") or {}).get("content"))
+            if content.strip():
+                return content
+
+            finish = choice.get("finish_reason")
+            last_err = f"{self.name} returned an empty answer (finish: {finish})"
+            if finish != "length":
+                break   # empty for another reason, more tokens won't help
+            log.info(f"{self.name} ran out of tokens at {budget}, retrying with {budget * 2}")
+        raise LLMError(last_err)
 
 
 class Cloudflare(Provider):
@@ -86,7 +110,8 @@ class Cloudflare(Provider):
         if resp.status_code != 200 or not data.get("success", False):
             raise LLMError(f"cloudflare HTTP {resp.status_code}: {data.get('errors')}")
 
-        content = (data.get("result") or {}).get("response") or ""
+        # Workers AI may return an already-parsed JSON object instead of text
+        content = _as_text((data.get("result") or {}).get("response"))
         if not content.strip():
             raise LLMError("cloudflare returned an empty answer")
         return content
@@ -95,21 +120,16 @@ class Cloudflare(Provider):
 def _build(name: str) -> Provider:
     s = settings
     if name == "groq":
-        return OpenAIStyle(
-            "groq",
-            "https://api.groq.com/openai/v1/chat/completions",
-            s.groq_api_key,
-            s.groq_model,
-        )
+        return OpenAIStyle("groq", "https://api.groq.com/openai/v1/chat/completions",
+                           s.groq_api_key, s.groq_model)
+    if name == "groq_small":
+        return OpenAIStyle("groq_small", "https://api.groq.com/openai/v1/chat/completions",
+                           s.groq_api_key, s.groq_small_model)
     if name == "cloudflare":
         return Cloudflare(s.cf_account_id, s.cf_auth_token, s.cf_model)
     if name == "gemini":
-        return OpenAIStyle(
-            "gemini",
-            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-            s.gemini_api_key,
-            s.gemini_model,
-        )
+        return OpenAIStyle("gemini", "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                           s.gemini_api_key, s.gemini_model)
     raise ValueError(f"Unknown provider: {name}")
 
 
@@ -135,6 +155,10 @@ class LLM:
                     if any(h in msg.lower() for h in PERMANENT_HINTS):
                         break  # move on to the next provider
                     time.sleep(1.5)
+                except Exception as e:  # never let a provider bug crash the whole request
+                    log.warning(f"{p.name} unexpected error: {e}")
+                    errors.append(f"{p.name} unexpected: {str(e)[:200]}")
+                    break
         raise LLMError("All LLM providers failed:\n" + "\n".join(errors))
 
 
