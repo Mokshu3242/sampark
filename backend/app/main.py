@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.core.run_registry import RunRegistry
+from app.api import routes_runs
 
 setup_logging()
 log = logging.getLogger("flood-watch")
@@ -32,3 +33,5 @@ def health():
 @app.get("/version")
 def version():
     return {"version": app.version, "env": settings.env}
+
+app.include_router(routes_runs.router)
