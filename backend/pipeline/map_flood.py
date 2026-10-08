@@ -39,7 +39,7 @@ def map_flood(run_id: str, bbox: list[float]) -> dict:
     dem = preprocess.read_aligned(dem_path, ref, Resampling.bilinear)[0]
     slope = preprocess.slope_deg(dem, pixel_m)
 
-    water_area, river_area, osm_status = reference_water.water_polygons(bbox, ref["crs"])
+    water_area, river_area, osm_status = reference_water.water_polygons(bbox, ref["crs"], run_dir)
 
     def burn(geoms) -> np.ndarray:
         if len(geoms) == 0:
