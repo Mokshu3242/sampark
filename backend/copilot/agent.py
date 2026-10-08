@@ -48,11 +48,12 @@ def _result(answer, tool_outputs, trace, provider, check=None, **extra) -> dict:
     }
 
 
-def ask(question: str, run_dir: Path, language: str = "auto", llm: LLM | None = None) -> dict:
+def ask(question: str, run_dir: Path, language: str = "auto", llm: LLM | None = None,
+        history: list[dict] | None = None) -> dict:
     """Answer a question. language: 'en', 'ne', or 'auto' (Nepali if the question is in Devanagari)."""
     llm = llm or get_llm()
     want_ne = language == "ne" or (language == "auto" and DEVANAGARI_TEXT.search(question))
-    result = _answer_en(question, run_dir, llm)
+    result = _answer_en(question, run_dir, llm, history or [])
 
     if want_ne and result.get("verified"):
         ne = to_nepali(result["answer"], llm)
@@ -63,9 +64,11 @@ def ask(question: str, run_dir: Path, language: str = "auto", llm: LLM | None = 
     return result
 
 
-def _answer_en(question: str, run_dir: Path, llm: LLM) -> dict:
+def _answer_en(question: str, run_dir: Path, llm: LLM, history: list[dict]) -> dict:
     box = ToolBox(run_dir)
-    messages = [{"role": "system", "content": SYSTEM_EN}, {"role": "user", "content": question}]
+    past = [{"role": h["role"], "content": str(h["content"])[:500]}
+            for h in history[-6:] if h.get("role") in ("user", "assistant")]
+    messages = [{"role": "system", "content": SYSTEM_EN}, *past, {"role": "user", "content": question}]
     tool_outputs, trace = [], []
     retries, bad_tools = 0, 0
 

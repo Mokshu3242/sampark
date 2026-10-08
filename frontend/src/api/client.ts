@@ -1,0 +1,46 @@
+const API = import.meta.env.VITE_API_URL || "http://localhost:8000";
+
+export type RunInfo = {
+  run_id: string;
+  status: string;
+  stage?: string;
+  stage_index?: number;
+  stage_total?: number;
+  detail?: string;
+  ready?: boolean;
+  request?: { name: string; bbox: number[]; flood_date: string };
+  quality?: any;
+};
+
+async function j(r: Response) {
+  if (!r.ok) throw new Error((await r.text()) || r.statusText);
+  return r.json();
+}
+
+export const createRun = (bbox: number[], flood_date: string, name = "dashboard") =>
+  fetch(`${API}/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, bbox, flood_date, window_days: 30 }),
+  }).then(j) as Promise<{ run_id: string }>;
+
+export const listRuns = () => fetch(`${API}/runs`).then(j).then((d) => d.runs as RunInfo[]);
+export const getRun = (id: string) => fetch(`${API}/runs/${id}`).then(j) as Promise<RunInfo>;
+export const getStats = (id: string) => fetch(`${API}/runs/${id}/stats`).then(j);
+
+export const askCopilot = (id: string, question: string, language = "auto", history: any[] = []) =>
+  fetch(`${API}/runs/${id}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ question, language, history }),
+  }).then(j);
+
+export const layerUrl = (id: string, name: string) => `${API}/runs/${id}/layers/${name}`;
+export const reportUrl = (id: string, lang: "en" | "ne") => `${API}/runs/${id}/report?lang=${lang}`;
+export const exportUrl = (id: string) => `${API}/runs/${id}/export`;
+
+export const PRESETS = [
+  { label: "Bhote Koshi–Trishuli", bbox: [85.15, 27.9, 85.45, 28.3], date: "2026-08-26" },
+  { label: "Lower Trishuli", bbox: [85.1, 27.85, 85.5, 28.1], date: "2026-08-26" },
+  { label: "Rasuwagadhi", bbox: [85.28, 28.1, 85.42, 28.3], date: "2026-08-26" },
+];

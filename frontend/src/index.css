@@ -1,1 +1,65 @@
-html, body, #root { margin: 0; padding: 0; height: 100%; }
+* { box-sizing: border-box; }
+html, body, #root { margin: 0; padding: 0; height: 100%; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; color: #222; }
+body { background: #fafafa; }
+
+.app { display: grid; grid-template-columns: 300px 1fr 380px; height: 100vh; }
+.left, .right { overflow-y: auto; background: #fafafa; padding: 12px; }
+.left { border-right: 1px solid #ddd; }
+.right { border-left: 1px solid #ddd; }
+.map-wrap { position: relative; height: 100vh; min-height: 0; }
+.map { width: 100%; height: 100%; }
+
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 14px; margin: 0 0 8px; color: #333; }
+header { margin-bottom: 10px; }
+.muted { color: #777; font-size: 12px; }
+
+.panel { background: #fff; border: 1px solid #e0e0e0; border-radius: 6px; padding: 10px; margin-bottom: 10px; }
+.panel label { display: block; font-size: 12px; color: #555; margin: 8px 0 4px; }
+.panel input, .panel select { width: 100%; padding: 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+.panel button { margin-top: 10px; width: 100%; padding: 8px; background: #1565c0; color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; }
+.panel button:disabled { background: #90a4ae; cursor: not-allowed; }
+.bbox-row { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
+.error { color: #c62828; font-size: 12px; margin-top: 6px; white-space: pre-wrap; }
+
+.disclaimer { font-size: 11px; background: #fff3cd; border-left: 3px solid #e0a800; padding: 6px 8px; margin-bottom: 10px; border-radius: 3px; }
+
+.layer-row { display: flex !important; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px !important; color: #222 !important; margin: 0 !important; cursor: pointer; }
+.layer-row input { width: auto !important; margin: 0; }
+.swatch { width: 12px; height: 12px; border-radius: 2px; display: inline-block; }
+
+.progress { display: grid; grid-template-columns: repeat(5, 1fr); gap: 3px; margin: 6px 0; }
+.step { font-size: 10px; text-align: center; padding: 4px 2px; background: #eceff1; color: #78909c; border-radius: 3px; }
+.step.active { background: #ffe082; color: #5d4037; font-weight: 600; }
+.step.done { background: #c8e6c9; color: #1b5e20; }
+.status { font-size: 12px; color: #444; margin: 4px 0; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.actions a { font-size: 12px; padding: 5px 9px; background: #e3f2fd; color: #0d47a1; text-decoration: none; border-radius: 3px; }
+.actions a:hover { background: #bbdefb; }
+
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; font-size: 12px; }
+.grid2 > div { display: flex; justify-content: space-between; border-bottom: 1px dotted #eee; padding-bottom: 2px; }
+.grid2 span { color: #666; }
+.grid2 b { font-variant-numeric: tabular-nums; }
+
+.repair { padding-left: 20px; font-size: 12px; margin: 0 0 10px; }
+.repair li { margin-bottom: 6px; }
+.villages { width: 100%; font-size: 12px; border-collapse: collapse; }
+.villages th, .villages td { padding: 3px 6px; border-bottom: 1px solid #eee; text-align: left; }
+.villages .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+.chat .msgs { max-height: 300px; overflow-y: auto; margin-bottom: 6px; }
+.msg { padding: 6px 8px; border-radius: 6px; margin: 4px 0; font-size: 13px; line-height: 1.4; }
+.msg.user { background: #e3f2fd; }
+.msg.bot { background: #f1f8e9; }
+.msg details { margin-top: 4px; font-size: 11px; color: #555; }
+.msg ul { margin: 4px 0 0; padding-left: 16px; }
+.chat-controls { display: grid; grid-template-columns: 80px 1fr auto; gap: 4px; }
+.chat-controls input, .chat-controls select { padding: 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; width: 100%; }
+.chat-controls button { margin: 0; width: auto; padding: 6px 12px; background: #2e7d32; }
+.chat-controls button:disabled { background: #a5d6a7; }
+.suggest { display: block; width: 100%; text-align: left; margin: 4px 0 !important; padding: 6px 8px !important;
+           font-size: 12px !important; background: #f5f5f5 !important; color: #333 !important; border: 1px solid #ddd !important; }
+.suggest:hover { background: #e8f5e9 !important; }
+
+.maplibregl-popup-content { font-size: 12px; line-height: 1.4; }
