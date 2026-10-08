@@ -1,0 +1,21 @@
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-multipart==0.0.10
+
+# pipeline (installed now, used later)
+rasterio==1.4.1
+geopandas==1.0.1
+xarray==2024.9.0
+rioxarray==0.17.0
+shapely==2.0.6
+scikit-image==0.24.0
+networkx==3.3
+momepy
+pysheds==0.5
+openeo
+requests==2.32.3
+
+# copilot
+google-genai

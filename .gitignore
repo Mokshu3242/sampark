@@ -1,0 +1,20 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+dist/
+
+# Env
+.env
+.env.local
+
+# Data runs
+backend/data/runs/*
+!backend/data/runs/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
