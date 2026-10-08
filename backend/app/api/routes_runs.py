@@ -5,6 +5,7 @@ from app.core.config import settings
 from app.core.run_registry import RunRegistry
 from app.schemas.run import RunRequest
 from pipeline.fetch import fetch_all
+from pipeline.map_flood import map_flood
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 registry = RunRegistry(settings.runs_dir)
@@ -32,3 +33,12 @@ def get_run(run_id: str):
     quality_path = settings.runs_dir / run_id / "quality.json"
     quality = json.loads(quality_path.read_text()) if quality_path.exists() else None
     return {"run_id": run_id, **status, "quality": quality}
+
+@router.post("/{run_id}/map")
+def map_run(run_id: str, bg: BackgroundTasks):
+    req_path = settings.runs_dir / run_id / "request.json"
+    if not req_path.exists():
+        raise HTTPException(404, "run not found")
+    req = json.loads(req_path.read_text())
+    bg.add_task(map_flood, run_id, req["bbox"])
+    return {"run_id": run_id, "status": "mapping_started"}

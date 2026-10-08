@@ -18,3 +18,4 @@ openeo
 requests==2.32.3
 
 openai==1.51.0
+matplotlib
