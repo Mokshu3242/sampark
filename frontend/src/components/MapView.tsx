@@ -1,7 +1,10 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { imageBounds, imageUrl, layerUrl, traceFlow } from "../api/client";
+
+type Highlight = { name: string; lon: number; lat: number } | null;
 
 type Props = {
   runId: string | null;
@@ -11,6 +14,9 @@ type Props = {
   flowMode: boolean;
   onFlowResult: (r: any) => void;
   flowKm: number | null;
+  onVillageSelect: (name: string) => void;
+  highlight: Highlight;
+  card: ReactNode; // pinned village card, shown in a popup on the map
 };
 
 const LAYER_IDS: Record<string, string[]> = {
@@ -29,6 +35,8 @@ const FLOW_LAYERS = [
   "flow-events", "flow-front-halo", "flow-front",
 ];
 const FLOW_SOURCES = ["flowpath", "flow-done", "flow-front", "flow-events"];
+const SELECT_LAYERS = ["selected-halo", "selected-ring"];
+const SELECT_SOURCE = "selected-village";
 const ATTRIBUTION =
   "Contains modified Copernicus Sentinel data 2026 · Copernicus WorldDEM-30 © DLR e.V., © Airbus DS · © OpenStreetMap contributors";
 
@@ -42,9 +50,14 @@ const EVENT_COLOR: any = [
   "village", "#d500f9",
   "#888",
 ];
+const STATUS_LABEL: Record<string, string> = { cut_off: "Cut off", longer_route: "Longer route" };
 
 const loadedMaps = new WeakSet<maplibregl.Map>();
 const EMPTY: any = { type: "FeatureCollection", features: [] };
+
+function esc(s: any): string {
+  return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]!));
+}
 
 function whenReady(map: maplibregl.Map, fn: () => void) {
   if (loadedMaps.has(map)) fn();
@@ -56,8 +69,14 @@ function clearFlow(map: maplibregl.Map) {
   for (const s of FLOW_SOURCES) if (map.getSource(s)) map.removeSource(s);
 }
 
+function clearSelection(map: maplibregl.Map) {
+  for (const id of SELECT_LAYERS) if (map.getLayer(id)) map.removeLayer(id);
+  if (map.getSource(SELECT_SOURCE)) map.removeSource(SELECT_SOURCE);
+}
+
 function clearRunLayers(map: maplibregl.Map) {
   clearFlow(map);
+  clearSelection(map);
   for (const n of RASTERS) {
     if (map.getLayer(`raster-${n}`)) map.removeLayer(`raster-${n}`);
     if (map.getSource(`raster-${n}`)) map.removeSource(`raster-${n}`);
@@ -164,29 +183,32 @@ function drawFlow(map: maplibregl.Map, r: any) {
   map.addSource("flow-events", { type: "geojson",
     data: { type: "FeatureCollection", features: events } as any });
 
+  // Draw flow under the selection ring, if there is one
+  const before = map.getLayer("selected-halo") ? "selected-halo" : undefined;
+
   map.addLayer({ id: "flowpath-ahead", type: "line", source: "flowpath",
     layout: { "line-cap": "round", "line-join": "round" },
-    paint: { "line-color": "#00e5ff", "line-width": 2.5, "line-opacity": 0.35, "line-dasharray": [2, 2] } });
+    paint: { "line-color": "#00e5ff", "line-width": 2.5, "line-opacity": 0.35, "line-dasharray": [2, 2] } }, before);
   map.addLayer({ id: "flow-done-casing", type: "line", source: "flow-done",
     layout: { "line-cap": "round", "line-join": "round" },
-    paint: { "line-color": "#003a4d", "line-width": 8, "line-opacity": 0.5 } });
+    paint: { "line-color": "#003a4d", "line-width": 8, "line-opacity": 0.5 } }, before);
   map.addLayer({ id: "flow-done", type: "line", source: "flow-done",
     layout: { "line-cap": "round", "line-join": "round" },
-    paint: { "line-color": "#00e5ff", "line-width": 4.5 } });
+    paint: { "line-color": "#00e5ff", "line-width": 4.5 } }, before);
   map.addLayer({ id: "flow-events-glow", type: "circle", source: "flow-events",
     filter: ["<", ["get", "km"], -1],
-    paint: { "circle-radius": 16, "circle-color": EVENT_COLOR, "circle-opacity": 0.35, "circle-blur": 0.6 } });
+    paint: { "circle-radius": 16, "circle-color": EVENT_COLOR, "circle-opacity": 0.35, "circle-blur": 0.6 } }, before);
   map.addLayer({ id: "flow-events", type: "circle", source: "flow-events",
     filter: ["<", ["get", "km"], -1],
     paint: {
       "circle-radius": ["match", ["get", "kind"], "village", 8, "bridge_lost", 7, "debris", 6, 5],
       "circle-color": EVENT_COLOR, "circle-stroke-color": "#fff", "circle-stroke-width": 1.2,
-    } });
+    } }, before);
   map.addLayer({ id: "flow-front-halo", type: "circle", source: "flow-front",
-    paint: { "circle-radius": 18, "circle-color": "#00e5ff", "circle-opacity": 0.25, "circle-blur": 0.5 } });
+    paint: { "circle-radius": 18, "circle-color": "#00e5ff", "circle-opacity": 0.25, "circle-blur": 0.5 } }, before);
   map.addLayer({ id: "flow-front", type: "circle", source: "flow-front",
     paint: { "circle-radius": 7, "circle-color": "#ffffff",
-             "circle-stroke-color": "#00e5ff", "circle-stroke-width": 3 } });
+             "circle-stroke-color": "#00e5ff", "circle-stroke-width": 3 } }, before);
 }
 
 function updateFlow(map: maplibregl.Map, r: any, km: number) {
@@ -205,22 +227,46 @@ function updateFlow(map: maplibregl.Map, r: any, km: number) {
   map.setPaintProperty("flow-front-halo", "circle-radius", 16 + 5 * Math.sin(performance.now() / 180));
 }
 
-export default function MapView({ runId, ready, bbox, visible, flowMode, onFlowResult, flowKm }: Props) {
+export default function MapView({
+  runId, ready, bbox, visible, flowMode, onFlowResult, flowKm, onVillageSelect, highlight, card,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const bboxRef = useRef<number[] | null>(null);
   const userMoved = useRef(false);
   const lastFlow = useRef<any>(null);
+  const cardPopup = useRef<maplibregl.Popup | null>(null);
+  const [cardEl, setCardEl] = useState<HTMLDivElement | null>(null);
+
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
   const flowRef = useRef({ flowMode, runId, ready, onFlowResult });
   flowRef.current = { flowMode, runId, ready, onFlowResult };
+  const selectRef = useRef(onVillageSelect);
+  selectRef.current = onVillageSelect;
+  const highlightRef = useRef<Highlight>(highlight);
+  highlightRef.current = highlight;
 
   function fitToBox(animate: boolean) {
     const map = mapRef.current, b = bboxRef.current;
     if (!map || !b) return;
     map.resize();
     map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: 40, duration: animate ? 600 : 0 });
+  }
+
+  /** Draw (or clear) the yellow ring for the selected village. */
+  function drawSelection(map: maplibregl.Map, h: Highlight) {
+    const data: any = h
+      ? { type: "Feature", properties: {}, geometry: { type: "Point", coordinates: [h.lon, h.lat] } }
+      : EMPTY;
+    const src = map.getSource(SELECT_SOURCE) as maplibregl.GeoJSONSource | undefined;
+    if (src) { src.setData(data); return; }
+    map.addSource(SELECT_SOURCE, { type: "geojson", data });
+    map.addLayer({ id: "selected-halo", type: "circle", source: SELECT_SOURCE,
+      paint: { "circle-radius": 18, "circle-color": "#ffeb3b", "circle-opacity": 0.4, "circle-blur": 0.6 } });
+    map.addLayer({ id: "selected-ring", type: "circle", source: SELECT_SOURCE,
+      paint: { "circle-radius": 11, "circle-color": "rgba(0,0,0,0)",
+               "circle-stroke-color": "#fdd835", "circle-stroke-width": 3 } });
   }
 
   // Init once
@@ -252,20 +298,39 @@ export default function MapView({ runId, ready, bbox, visible, flowMode, onFlowR
     });
     ro.observe(containerRef.current);
 
+    // Village dots: hover = quick tooltip, click = pinned card
+    const hover = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 12, className: "vhover" });
+    const kmTxt = (v: any) =>
+      v === null || v === undefined || v === "null" || !Number.isFinite(Number(v)) ? "no route" : `${Number(v).toFixed(1)} km`;
+
     for (const id of ["villages-cut", "villages-longer"]) {
-      map.on("click", id, (e) => {
+      map.on("mousemove", id, (e) => {
         if (flowRef.current.flowMode) return;
-        const p: any = e.features?.[0]?.properties || {};
-        const km = (v: any) => (v === null || v === undefined || v === "null" ? "no route" : `${v} km`);
-        new maplibregl.Popup()
-          .setLngLat(e.lngLat)
-          .setHTML(`<b>${p.name}</b><br>Status: ${p.status}<br>Buildings: ${p.buildings_total}<br>
-                    To help: ${km(p.dist_before_km)} → ${km(p.dist_after_km)}<br>
-                    Nearest road: ${p.road_snap_m} m`)
+        const f: any = e.features?.[0];
+        const p = f?.properties || {};
+        if (!p.name || highlightRef.current?.name === p.name) { hover.remove(); return; }
+        map.getCanvas().style.cursor = "pointer";
+        hover
+          .setLngLat(f.geometry.coordinates)
+          .setHTML(
+            `<b>${esc(p.name)}</b><br>` +
+            `<span class="h-${esc(p.status)}">${STATUS_LABEL[p.status] ?? esc(p.status)}</span>` +
+            ` · ${Number(p.buildings_total || 0).toLocaleString()} buildings<br>` +
+            `To help: ${kmTxt(p.dist_before_km)} → ${kmTxt(p.dist_after_km)}<br>` +
+            `<i>Click for details</i>`,
+          )
           .addTo(map);
       });
-      map.on("mouseenter", id, () => { if (!flowRef.current.flowMode) map.getCanvas().style.cursor = "pointer"; });
-      map.on("mouseleave", id, () => { map.getCanvas().style.cursor = flowRef.current.flowMode ? "crosshair" : ""; });
+      map.on("mouseleave", id, () => {
+        hover.remove();
+        map.getCanvas().style.cursor = flowRef.current.flowMode ? "crosshair" : "";
+      });
+      map.on("click", id, (e) => {
+        if (flowRef.current.flowMode) return;
+        hover.remove();
+        const name = (e.features?.[0]?.properties as any)?.name;
+        if (name) selectRef.current(name);
+      });
     }
 
     // Flow tracing click
@@ -296,6 +361,8 @@ export default function MapView({ runId, ready, bbox, visible, flowMode, onFlowR
     return () => {
       clearTimeout(t);
       ro.disconnect();
+      hover.remove();
+      cardPopup.current?.remove();
       map.remove();
       mapRef.current = null;
     };
@@ -316,6 +383,38 @@ export default function MapView({ runId, ready, bbox, visible, flowMode, onFlowR
     map.getCanvas().style.cursor = flowMode ? "crosshair" : "";
     if (!flowMode) { lastFlow.current = null; whenReady(map, () => clearFlow(map)); }
   }, [flowMode]);
+
+  // Selected village: ring + pinned card popup next to the dot
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    whenReady(map, () => {
+      drawSelection(map, highlight);
+      cardPopup.current?.remove();
+      cardPopup.current = null;
+      setCardEl(null);
+      if (!highlight) return;
+
+      const el = document.createElement("div");
+      cardPopup.current = new maplibregl.Popup({
+        closeButton: false, closeOnClick: false, maxWidth: "340px", offset: 16, className: "vpopup",
+      })
+        .setLngLat([highlight.lon, highlight.lat])
+        .setDOMContent(el)
+        .addTo(map);
+      setCardEl(el);
+
+      userMoved.current = true; // don't snap back to the run box on resize
+      // Put the dot low on screen so the card above it fits
+      map.flyTo({
+        center: [highlight.lon, highlight.lat],
+        zoom: Math.max(map.getZoom(), 12.5),
+        offset: [0, 180],
+        duration: 900,
+      });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [highlight?.name, highlight?.lon, highlight?.lat]);
 
   // Bbox outline + zoom
   const bboxKey = bbox ? bbox.join(",") : "";
@@ -376,8 +475,12 @@ export default function MapView({ runId, ready, bbox, visible, flowMode, onFlowR
       if (ok && !cancelled && map.getLayer("raster-uncertainty"))
         map.setLayoutProperty("raster-uncertainty", "visibility",
                               visibleRef.current.uncertainty ? "visible" : "none");
+
+      // Selection ring goes on top of everything
+      if (!cancelled) drawSelection(map, highlightRef.current);
     });
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runId, ready]);
 
   // Toggles
@@ -389,5 +492,10 @@ export default function MapView({ runId, ready, bbox, visible, flowMode, onFlowR
         if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", visible[name] ? "visible" : "none");
   }, [visible]);
 
-  return <div ref={containerRef} className="map" />;
+  return (
+    <>
+      <div ref={containerRef} className="map" />
+      {cardEl && card ? createPortal(card, cardEl) : null}
+    </>
+  );
 }

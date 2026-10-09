@@ -73,3 +73,7 @@ export async function imageBounds(runId: string, name: string, width = 1400): Pr
 export function imageUrl(runId: string, name: string, width = 1400): string {
   return `${API}/runs/${runId}/image/${name}.png?width=${width}`;
 }
+
+export function chipUrl(runId: string, name: "s2_before" | "s2_after", lon: number, lat: number, sizeM = 2000): string {
+  return `${API}/runs/${runId}/chip/${name}.png?lon=${lon.toFixed(5)}&lat=${lat.toFixed(5)}&size_m=${sizeM}&px=240`;
+}

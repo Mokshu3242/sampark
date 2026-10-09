@@ -14,6 +14,8 @@ from pyproj import Transformer
 from rasterio.warp import Resampling, calculate_default_transform, reproject
 
 from app.core.config import settings
+from functools import lru_cache
+from rasterio.windows import from_bounds
 
 log = logging.getLogger("flood-watch.images")
 router = APIRouter(prefix="/runs", tags=["images"])
@@ -170,3 +172,47 @@ def get_image(run_id: str, name: str, width: int = Query(1400, ge=200, le=2500))
 def get_image_bounds(run_id: str, name: str, width: int = Query(1400, ge=200, le=2500)):
     _, mb = _cached(run_id, name, width)
     return {"coordinates": _corners(mb)}
+
+@lru_cache(maxsize=16)
+def _global_stretch(path_str: str, mtime: float, bands: tuple, stretch: tuple) -> tuple[float, float]:
+    """One colour stretch for the whole image, so every chip matches the big overlay."""
+    with rasterio.open(path_str) as ds:
+        arr = ds.read(list(bands), out_shape=(len(bands), max(1, ds.height // 4), max(1, ds.width // 4))).astype("float32")
+        nod = ds.nodata
+    valid = np.all(arr != 0, axis=0)
+    if nod is not None:
+        valid &= np.all(arr != nod, axis=0)
+    if not valid.any():
+        return 0.0, 1.0
+    lo, hi = np.percentile(arr[:, valid], stretch)
+    return float(lo), float(hi if hi > lo else lo + 1)
+
+
+@router.get("/{run_id}/chip/{name}.png")
+def get_chip(run_id: str, name: str, lon: float, lat: float,
+             size_m: float = Query(2000, ge=500, le=5000), px: int = Query(240, ge=64, le=512)):
+    """Small square image around a point (village card). Sentinel-2 only."""
+    if name not in ("s2_before", "s2_after"):
+        raise HTTPException(404, "chips are only available for Sentinel-2")
+    path = _path(run_id, name)
+    spec = LAYERS[name]
+    bands = spec["bands"]
+    with rasterio.open(path) as ds:
+        x, y = Transformer.from_crs(4326, ds.crs, always_xy=True).transform(lon, lat)
+        h = size_m / 2
+        win = from_bounds(x - h, y - h, x + h, y + h, ds.transform)
+        fill = ds.nodata if ds.nodata is not None else 0
+        arr = ds.read(bands, window=win, out_shape=(len(bands), px, px), boundless=True,
+                      fill_value=fill, resampling=Resampling.nearest).astype("float32")
+        nod = ds.nodata
+    valid = np.all(arr != 0, axis=0)
+    if nod is not None:
+        valid &= np.all(arr != nod, axis=0)
+    lo, hi = _global_stretch(str(path), path.stat().st_mtime, tuple(bands), tuple(spec["stretch"]))
+    rgb = np.clip((arr - lo) / (hi - lo), 0, 1) ** spec["gamma"]
+    out = np.zeros((px, px, 4), dtype=np.uint8)
+    out[..., :3] = (rgb.transpose(1, 2, 0) * 255).astype(np.uint8)
+    out[..., 3] = np.where(valid, 255, 0)
+    buf = BytesIO()
+    Image.fromarray(out, "RGBA").save(buf, format="PNG", optimize=True)
+    return Response(buf.getvalue(), media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})

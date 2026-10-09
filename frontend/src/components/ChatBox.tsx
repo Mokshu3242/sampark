@@ -1,7 +1,13 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { askCopilot } from "../api/client";
 
 type Msg = { role: "user" | "bot"; text: string; sources?: any[]; provider?: string };
+
+type Props = {
+  runId: string | null;
+  pendingQuestion?: string | null;   // sent from outside, e.g. the village card
+  onPendingConsumed?: () => void;
+};
 
 const SUGGESTIONS = [
   "How many villages are cut off?",
@@ -9,15 +15,17 @@ const SUGGESTIONS = [
   "कति गाउँ सम्पर्कविहीन छन्?",
 ];
 
-export default function ChatBox({ runId }: { runId: string | null }) {
+export default function ChatBox({ runId, pendingQuestion, onPendingConsumed }: Props) {
   const [msgs, setMsgs] = useState<Msg[]>([]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [lang, setLang] = useState<"auto" | "en" | "ne">("auto");
+  const endRef = useRef<HTMLDivElement>(null);
 
-  async function send(q = input.trim()) {
-    if (!q || !runId) return;
-    setInput("");
+  async function send(text: string, fromInput = false) {
+    const q = text.trim();
+    if (!q || !runId || busy) return;
+    if (fromInput) setInput("");
     setMsgs((m) => [...m, { role: "user", text: q }]);
     setBusy(true);
     try {
@@ -30,6 +38,19 @@ export default function ChatBox({ runId }: { runId: string | null }) {
       setBusy(false);
     }
   }
+
+  // Questions sent from outside. Waits until the current reply has finished.
+  useEffect(() => {
+    if (!pendingQuestion || !runId || busy) return;
+    send(pendingQuestion);
+    onPendingConsumed?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingQuestion, runId, busy]);
+
+  // Keep the newest message in view
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [msgs, busy]);
 
   return (
     <div className="panel chat">
@@ -55,6 +76,7 @@ export default function ChatBox({ runId }: { runId: string | null }) {
           </div>
         ))}
         {busy && <div className="msg bot muted">Thinking…</div>}
+        <div ref={endRef} />
       </div>
       <div className="chat-controls">
         <select value={lang} onChange={(e) => setLang(e.target.value as any)}>
@@ -65,11 +87,11 @@ export default function ChatBox({ runId }: { runId: string | null }) {
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && send()}
+          onKeyDown={(e) => e.key === "Enter" && send(input, true)}
           placeholder="Ask a question…"
           disabled={!runId || busy}
         />
-        <button onClick={() => send()} disabled={!runId || busy || !input.trim()}>Send</button>
+        <button onClick={() => send(input, true)} disabled={!runId || busy || !input.trim()}>Send</button>
       </div>
     </div>
   );

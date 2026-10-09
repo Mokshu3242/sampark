@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import MapView from "./components/MapView";
 import RunForm from "./components/RunForm";
 import LayerPanel from "./components/LayerPanel";
@@ -6,23 +6,34 @@ import StatsPanel from "./components/StatsPanel";
 import CutoffList from "./components/CutoffList";
 import ChatBox from "./components/ChatBox";
 import FlowPanel from "./components/FlowPanel";
-import { exportUrl, getRun, getStats, reportUrl, type RunInfo } from "./api/client";
+import VillageSearch from "./components/VillageSearch";
+import VillageDetailCard from "./components/VillageDetailCard";
+import { exportUrl, getRun, getStats, layerUrl, reportUrl, type RunInfo } from "./api/client";
+import VillageCard from "./components/VillageCard";
 
 const STAGE_LABELS = ["Created", "Satellite data", "Flood map", "Damage", "Cut-off routing", "Done"];
+const same = (a: any, b: any) => String(a ?? "").toLowerCase() === String(b ?? "").toLowerCase();
 
 export default function App() {
   const [runId, setRunId] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
   const [run, setRun] = useState<RunInfo | null>(null);
   const [stats, setStats] = useState<any>(null);
+  const [villageRows, setVillageRows] = useState<any[]>([]);
   const [visible, setVisible] = useState<Record<string, boolean>>({
     repair: true, flood: true, debris: true, roads: true, villages: true, uncertainty: false,
   });
   const [flowMode, setFlowMode] = useState(false);
   const [flowResult, setFlowResult] = useState<any>(null);
   const [flowKm, setFlowKm] = useState<number | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
+
   const onFlowResult = useCallback((r: any) => setFlowResult(r), []);
   const onFlowKm = useCallback((km: number | null) => setFlowKm(km), []);
+  const onSelect = useCallback((name: string) => setSelected(name), []);
+  const onAsk = useCallback((q: string) => setPendingQuestion(q), []);
+  const onConsumed = useCallback(() => setPendingQuestion(null), []);
 
   const failed = run?.status === "failed";
   const ready = !!run?.ready && !failed;
@@ -31,11 +42,9 @@ export default function App() {
   useEffect(() => {
     if (!runId) return;
     let cancelled = false;
-    setRun(null);
-    setStats(null);
-    setFlowMode(false);
-    setFlowResult(null);
-    setFlowKm(null);
+    setRun(null); setStats(null); setVillageRows([]);
+    setFlowMode(false); setFlowResult(null); setFlowKm(null);
+    setSelected(null); setPendingQuestion(null);
     const tick = async () => {
       try {
         const r = await getRun(runId);
@@ -44,6 +53,16 @@ export default function App() {
         if (r.ready || r.status === "failed") {
           const s = await getStats(runId);
           if (!cancelled) setStats(s);
+          try {
+            const vr = await fetch(layerUrl(runId, "villages"));
+            if (vr.ok && !cancelled) {
+              const gj = await vr.json();
+              setVillageRows((gj.features || []).map((f: any) => {
+                const c = f.geometry?.type === "Point" ? f.geometry.coordinates : null;
+                return { ...f.properties, _lon: c?.[0], _lat: c?.[1] };
+              }));
+            }
+          } catch { /* no villages layer */ }
           return;
         }
       } catch { /* retry */ }
@@ -52,6 +71,25 @@ export default function App() {
     tick();
     return () => { cancelled = true; };
   }, [runId, reload]);
+
+  // Villages + their damage numbers from damage_stats
+  const villages = useMemo(() => {
+    const per: any[] = stats?.damage?.per_settlement || [];
+    return villageRows.map((v) => {
+      const d = per.find((p) => same(p.name, v.name));
+      return d ? { ...v, buildings_affected: d.buildings_affected, roads_cut: d.roads_cut, bridges_lost: d.bridges_lost } : v;
+    });
+  }, [villageRows, stats]);
+
+  const selectedRow = useMemo(
+    () => (selected ? villages.find((v) => same(v.name, selected)) ?? null : null),
+    [selected, villages],
+  );
+  const highlight = useMemo(
+    () => (selectedRow && Number.isFinite(selectedRow._lon)
+      ? { name: selectedRow.name, lon: selectedRow._lon, lat: selectedRow._lat } : null),
+    [selectedRow],
+  );
 
   const stageIdx = ready ? 5 : Math.max(0, run?.stage_index ?? 0);
 
@@ -90,6 +128,8 @@ export default function App() {
           </div>
         )}
 
+        {ready && villages.length > 0 && <VillageSearch villages={villages} onSelect={onSelect} />}
+
         <LayerPanel
           visible={visible}
           onToggle={(n) => setVisible((v) => ({ ...v, [n]: !v[n] }))}
@@ -107,14 +147,31 @@ export default function App() {
       </aside>
 
       <main className="map-wrap">
-        <MapView runId={runId} ready={ready} bbox={run?.request?.bbox ?? null} visible={visible}
-                 flowMode={flowMode} onFlowResult={onFlowResult} flowKm={flowKm} />
+        <MapView
+          runId={runId} ready={ready} bbox={run?.request?.bbox ?? null} visible={visible}
+          flowMode={flowMode} onFlowResult={onFlowResult} flowKm={flowKm}
+          onVillageSelect={onSelect} highlight={highlight}
+          card={selectedRow && runId ? (
+            <VillageCard runId={runId} village={selectedRow}
+                         repairPlan={stats?.cutoff?.repair_plan ?? []}
+                         onClose={() => setSelected(null)} />
+          ) : null}
+        />
       </main>
 
       <aside className="right">
+        {selectedRow && (
+          <VillageDetailCard
+            village={selectedRow}
+            repairPlan={stats?.cutoff?.repair_plan ?? []}
+            onAskCopilot={onAsk}
+            onClose={() => setSelected(null)}
+          />
+        )}
         <StatsPanel stats={stats} />
-        <CutoffList stats={stats} />
-        <ChatBox key={runId ?? "none"} runId={ready ? runId : null} />
+        <CutoffList stats={stats} onSelectVillage={onSelect} />
+        <ChatBox key={runId ?? "none"} runId={ready ? runId : null}
+                 pendingQuestion={pendingQuestion} onPendingConsumed={onConsumed} />
       </aside>
     </div>
   );

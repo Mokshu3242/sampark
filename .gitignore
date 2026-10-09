@@ -20,3 +20,8 @@ backend/data/runs/*
 Thumbs.db
 
 backend/data/emsr927/
+backend/data/runs/
+backend/data/emsr927/
+*.tif
+cache_*.png
+cache_*.bounds
