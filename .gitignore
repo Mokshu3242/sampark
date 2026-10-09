@@ -18,3 +18,5 @@ backend/data/runs/*
 # OS
 .DS_Store
 Thumbs.db
+
+backend/data/emsr927/

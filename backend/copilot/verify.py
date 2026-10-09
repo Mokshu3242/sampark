@@ -4,8 +4,11 @@ DEVANAGARI = str.maketrans("०१२३४५६७८९", "0123456789")
 # A number not glued to a letter or dot on its left: "34", "4,308", "8.79", "-2.05"
 NUM_RE = re.compile(r"(?<![\w.])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|(?<![\w.])-?\d+(?:\.\d+)?")
 # Fields that are metadata, not facts a rescuer would quote
-SKIP_KEYS = {"area_bbox", "thresholds", "pixel_size_m", "crs", "radar_orbit", "rules",
-             "field_meanings", "osm_snapshot", "note", "network_note", "quality_notes"}
+SKIP_KEYS = {
+    "area_bbox", "thresholds", "pixel_size_m", "crs", "radar_orbit", "rules",
+    "field_meanings", "osm_snapshot", "note", "network_note", "quality_notes",
+    "confusion_px", "items", "by_class", "tolerance_m",
+}
 COUNTED_LISTS = {"villages", "packages", "villages_reconnected", "top_damaged_villages", "matches"}
 
 

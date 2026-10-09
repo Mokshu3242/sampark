@@ -37,5 +37,11 @@ def run_pipeline(run_id: str, bbox: list[float], flood_date: date, window_days: 
             registry.set_status(run_id, "failed", f"{stage}: {str(e)[:200]}")
             return {"failed_at": stage, "error": str(e)[:200]}
 
+    try:
+        from pipeline import hydrology
+        hydrology.build_hydro(settings.runs_dir / run_id)
+    except Exception as e:                      # bonus feature: never fail the run for it
+        log.warning(f"Flow cache not built: {e}")
+
     registry.set_status(run_id, "done", "Pipeline complete")
     return summary

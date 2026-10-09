@@ -18,6 +18,7 @@ from pipeline.map_cutoff import map_cutoff
 from pipeline.map_damage import map_damage
 from pipeline.map_flood import map_flood
 from pipeline.run_all import run_pipeline
+from pipeline.hydrology import corridor_events, trace as trace_flow, villages_along
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 registry = RunRegistry(settings.runs_dir)
@@ -37,6 +38,11 @@ class ChatRequest(BaseModel):
     question: str
     language: str = "auto"
     history: list[dict] = []
+
+class FlowRequest(BaseModel):
+    lon: float
+    lat: float
+    buffer_m: float = 500.0
 
 def _run_dir(run_id: str):
     d = settings.runs_dir / run_id
@@ -133,7 +139,7 @@ def get_layer(run_id: str, name: str):
 def get_stats(run_id: str):
     run_dir = _run_dir(run_id)
     out = {}
-    for key, fname in [("flood", "flood_stats.json"), ("damage", "damage_stats.json"), ("cutoff", "cutoff_stats.json")]:
+    for key, fname in [("flood", "flood_stats.json"), ("damage", "damage_stats.json"), ("cutoff", "cutoff_stats.json"), ("eval", "eval.json")]:
         p = run_dir / fname
         out[key] = json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
     return out
@@ -182,3 +188,28 @@ def export_run(run_id: str):
                    "© OpenStreetMap contributors. OSM-derived data is licensed under ODbL.\n")
     return Response(buf.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{run_id}.zip"'})
+
+@router.get("/{run_id}/eval")
+def get_eval(run_id: str):
+    p = settings.runs_dir / run_id / "eval.json"
+    if not p.exists():
+        raise HTTPException(404, "No validation for this run. Run scripts.eval_emsr first.")
+    return json.loads(p.read_text(encoding="utf-8"))
+
+@router.post("/{run_id}/flowpath")
+def flowpath(run_id: str, body: FlowRequest):
+    run_dir = _run_dir(run_id)
+    if not (100 <= body.buffer_m <= 3000):
+        raise HTTPException(400, "buffer_m must be 100 to 3000")
+    try:
+        feature = trace_flow(run_dir, body.lon, body.lat)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    return {
+        "path": feature,
+        "villages": villages_along(feature, run_dir, body.buffer_m),
+        "buffer_m": body.buffer_m,
+        "corridor": corridor_events(feature, run_dir, village_buffer_m=body.buffer_m),
+    }

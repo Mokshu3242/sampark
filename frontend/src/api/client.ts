@@ -44,3 +44,22 @@ export const PRESETS = [
   { label: "Lower Trishuli", bbox: [85.1, 27.85, 85.5, 28.1], date: "2026-08-26" },
   { label: "Rasuwagadhi", bbox: [85.28, 28.1, 85.42, 28.3], date: "2026-08-26" },
 ];
+
+export async function getEval(id: string): Promise<any | null> {
+  const r = await fetch(`${API}/runs/${id}/eval`);
+  return r.ok ? r.json() : null;
+}
+
+export async function traceFlow(runId: string, lon: number, lat: number, bufferM = 500): Promise<any> {
+  const r = await fetch(`${API}/runs/${runId}/flowpath`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ lon, lat, buffer_m: bufferM }),
+  });
+  if (!r.ok) {
+    let msg = await r.text();
+    try { msg = JSON.parse(msg).detail || msg; } catch { /* plain text */ }
+    throw new Error(msg);
+  }
+  return r.json();
+}

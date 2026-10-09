@@ -1,21 +1,28 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import MapView from "./components/MapView";
 import RunForm from "./components/RunForm";
 import LayerPanel from "./components/LayerPanel";
 import StatsPanel from "./components/StatsPanel";
 import CutoffList from "./components/CutoffList";
 import ChatBox from "./components/ChatBox";
+import FlowPanel from "./components/FlowPanel";
 import { exportUrl, getRun, getStats, reportUrl, type RunInfo } from "./api/client";
 
 const STAGE_LABELS = ["Created", "Satellite data", "Flood map", "Damage", "Cut-off routing", "Done"];
 
 export default function App() {
   const [runId, setRunId] = useState<string | null>(null);
+  const [reload, setReload] = useState(0);
   const [run, setRun] = useState<RunInfo | null>(null);
   const [stats, setStats] = useState<any>(null);
   const [visible, setVisible] = useState<Record<string, boolean>>({
     repair: true, flood: true, debris: true, roads: true, villages: true,
   });
+  const [flowMode, setFlowMode] = useState(false);
+  const [flowResult, setFlowResult] = useState<any>(null);
+  const [flowKm, setFlowKm] = useState<number | null>(null);
+  const onFlowResult = useCallback((r: any) => setFlowResult(r), []);
+  const onFlowKm = useCallback((km: number | null) => setFlowKm(km), []);
 
   const failed = run?.status === "failed";
   const ready = !!run?.ready && !failed;
@@ -26,6 +33,9 @@ export default function App() {
     let cancelled = false;
     setRun(null);
     setStats(null);
+    setFlowMode(false);
+    setFlowResult(null);
+    setFlowKm(null);
     const tick = async () => {
       try {
         const r = await getRun(runId);
@@ -41,7 +51,7 @@ export default function App() {
     };
     tick();
     return () => { cancelled = true; };
-  }, [runId]);
+  }, [runId, reload]);
 
   const stageIdx = ready ? 5 : Math.max(0, run?.stage_index ?? 0);
 
@@ -57,7 +67,7 @@ export default function App() {
           Educational prototype, not an operational tool. Results are satellite estimates and are not field-verified.
         </div>
 
-        <RunForm onSelect={setRunId} disabled={running} />
+        <RunForm onSelect={(id) => { setRunId(id); setReload((n) => n + 1); }} disabled={running} />
 
         {runId && (
           <div className="panel">
@@ -79,11 +89,22 @@ export default function App() {
             )}
           </div>
         )}
+
         <LayerPanel visible={visible} onToggle={(n) => setVisible((v) => ({ ...v, [n]: !v[n] }))} />
+
+        {ready && (
+          <FlowPanel
+            flowMode={flowMode}
+            onToggle={() => { setFlowMode((m) => !m); setFlowResult(null); setFlowKm(null); }}
+            result={flowResult}
+            onKm={onFlowKm}
+          />
+        )}
       </aside>
 
       <main className="map-wrap">
-        <MapView runId={runId} ready={ready} bbox={run?.request?.bbox ?? null} visible={visible} />
+        <MapView runId={runId} ready={ready} bbox={run?.request?.bbox ?? null} visible={visible}
+                 flowMode={flowMode} onFlowResult={onFlowResult} flowKm={flowKm} />
       </main>
 
       <aside className="right">

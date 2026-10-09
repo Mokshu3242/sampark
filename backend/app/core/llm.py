@@ -122,9 +122,6 @@ def _build(name: str) -> Provider:
     if name == "groq":
         return OpenAIStyle("groq", "https://api.groq.com/openai/v1/chat/completions",
                            s.groq_api_key, s.groq_model)
-    if name == "groq_small":
-        return OpenAIStyle("groq_small", "https://api.groq.com/openai/v1/chat/completions",
-                           s.groq_api_key, s.groq_small_model)
     if name == "cloudflare":
         return Cloudflare(s.cf_account_id, s.cf_auth_token, s.cf_model)
     if name == "gemini":

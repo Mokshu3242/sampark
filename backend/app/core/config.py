@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 BACKEND = Path(__file__).resolve().parents[2]   # backend/
 REPO = BACKEND.parent                            # repo root
 
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=(REPO / ".env", BACKEND / ".env"),
@@ -16,11 +17,11 @@ class Settings(BaseSettings):
     cdse_client_id: str = ""
     cdse_client_secret: str = ""
 
-    llm_order: str = "groq,cloudflare,gemini"
+    # LLM order: tried left to right, providers without keys are skipped
+    llm_order: str = "groq,cloudflare"
 
     groq_api_key: str = ""
-    groq_small_model: str = "openai/gpt-oss-20b"
-    
+    groq_model: str = "openai/gpt-oss-120b"
 
     cf_account_id: str = ""
     cf_auth_token: str = ""
@@ -33,7 +34,7 @@ class Settings(BaseSettings):
 
     def available_llms(self) -> list[str]:
         has_key = {
-            "groq_small": bool(self.groq_api_key),
+            "groq": bool(self.groq_api_key),
             "cloudflare": bool(self.cf_account_id and self.cf_auth_token),
             "gemini": bool(self.gemini_api_key),
         }
@@ -42,5 +43,6 @@ class Settings(BaseSettings):
 
     def missing_keys(self) -> list[str]:
         return [] if self.available_llms() else ["no LLM provider has a key"]
+
 
 settings = Settings()
