@@ -7,11 +7,12 @@ import CutoffList from "./components/CutoffList";
 import ChatBox from "./components/ChatBox";
 import FlowPanel from "./components/FlowPanel";
 import VillageSearch from "./components/VillageSearch";
-import { exportUrl, getRun, getStats, layerUrl, reportUrl, type RunInfo } from "./api/client";
 import VillageCard from "./components/VillageCard";
+import { exportUrl, getRun, getStats, layerUrl, reportUrl, villageNamesFrom, type RunInfo } from "./api/client";
 
 const STAGE_LABELS = ["Created", "Satellite data", "Flood map", "Damage", "Cut-off routing", "Done"];
 const same = (a: any, b: any) => String(a ?? "").toLowerCase() === String(b ?? "").toLowerCase();
+const low = (s: any) => String(s ?? "").toLowerCase();
 
 export default function App() {
   const [runId, setRunId] = useState<string | null>(null);
@@ -27,12 +28,15 @@ export default function App() {
   const [flowKm, setFlowKm] = useState<number | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
+  const [repairUpTo, setRepairUpTo] = useState(0); // 0 = nothing ticked
 
   const onFlowResult = useCallback((r: any) => setFlowResult(r), []);
   const onFlowKm = useCallback((km: number | null) => setFlowKm(km), []);
   const onSelect = useCallback((name: string) => setSelected(name), []);
-  const onAsk = useCallback((q: string) => setPendingQuestion(q), []);
   const onConsumed = useCallback(() => setPendingQuestion(null), []);
+  // In plan order: tick #k → #1..#k. Untick #k → keep #1..#(k-1).
+  const onToggleRank = useCallback(
+    (rank: number) => setRepairUpTo((cur) => (cur >= rank ? rank - 1 : rank)), []);
 
   const failed = run?.status === "failed";
   const ready = !!run?.ready && !failed;
@@ -43,7 +47,7 @@ export default function App() {
     let cancelled = false;
     setRun(null); setStats(null); setVillageRows([]);
     setFlowMode(false); setFlowResult(null); setFlowKm(null);
-    setSelected(null); setPendingQuestion(null);
+    setSelected(null); setPendingQuestion(null); setRepairUpTo(0);
     const tick = async () => {
       try {
         const r = await getRun(runId);
@@ -88,6 +92,43 @@ export default function App() {
     () => (selectedRow && Number.isFinite(selectedRow._lon)
       ? { name: selectedRow.name, lon: selectedRow._lon, lat: selectedRow._lat } : null),
     [selectedRow],
+  );
+
+  // Repair what-if: packages #1..#repairUpTo, using the plan's own numbers
+  const whatIf = useMemo(() => {
+    const plan: any[] = stats?.cutoff?.repair_plan || [];
+    if (!repairUpTo || plan.length === 0) return null;
+    const chosen = plan.filter((p) => p.rank <= repairUpTo);
+    const names = new Set(chosen.flatMap((p) => villageNamesFrom(p.villages_reconnected)).map(low));
+    const cutRows = villages.filter((v) => v.status === "cut_off");
+    const backRows = villages.filter((v) => names.has(low(v.name)));
+    const cutBefore = stats?.cutoff?.cut_off ?? cutRows.length;
+    const stillCut = cutRows.length
+      ? cutRows.filter((v) => !names.has(low(v.name))).length
+      : Math.max(0, cutBefore - names.size);
+    return {
+      upTo: repairUpTo,
+      ranks: chosen.map((p) => p.rank),
+      names,
+      cutBefore,
+      stillCut,
+      villages: names.size,
+      buildings: chosen[chosen.length - 1]?.cumulative_buildings ?? 0,
+      repairM: Math.round(chosen.reduce((s, p) => s + (p.length_m || 0), 0)),
+      bridges: chosen.filter((p) => p.has_bridge).length,
+      villagesGeo: {
+        type: "FeatureCollection",
+        features: backRows
+          .filter((v) => Number.isFinite(v._lon) && Number.isFinite(v._lat))
+          .map((v) => ({ type: "Feature", properties: { name: v.name },
+                         geometry: { type: "Point", coordinates: [v._lon, v._lat] } })),
+      },
+    };
+  }, [repairUpTo, stats, villages]);
+
+  const mapWhatIf = useMemo(
+    () => (whatIf ? { ranks: whatIf.ranks, villagesGeo: whatIf.villagesGeo } : null),
+    [whatIf],
   );
 
   const stageIdx = ready ? 5 : Math.max(0, run?.stage_index ?? 0);
@@ -150,6 +191,7 @@ export default function App() {
           runId={runId} ready={ready} bbox={run?.request?.bbox ?? null} visible={visible}
           flowMode={flowMode} onFlowResult={onFlowResult} flowKm={flowKm}
           onVillageSelect={onSelect} highlight={highlight}
+          whatIf={mapWhatIf}
           card={selectedRow && runId ? (
             <VillageCard runId={runId} village={selectedRow}
                          repairPlan={stats?.cutoff?.repair_plan ?? []}
@@ -159,9 +201,8 @@ export default function App() {
       </main>
 
       <aside className="right">
-        
         <StatsPanel stats={stats} />
-        <CutoffList stats={stats} onSelectVillage={onSelect} />
+        <CutoffList stats={stats} whatIf={whatIf} onToggleRank={onToggleRank} onSelectVillage={onSelect} />
         <ChatBox key={runId ?? "none"} runId={ready ? runId : null}
                  pendingQuestion={pendingQuestion} onPendingConsumed={onConsumed} />
       </aside>

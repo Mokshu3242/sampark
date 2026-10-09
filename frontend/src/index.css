@@ -287,3 +287,18 @@ header .muted { margin: 4px 0 0; }
 .vanswer ul { margin: 4px 0 0; padding-left: 16px; }
 .panel .vagain { margin-top: 8px; padding: 5px; font-size: 11.5px; background: transparent; color: var(--accent); border: 1px solid var(--line); }
 .panel .vagain:hover:not(:disabled) { background: var(--accent-soft); }
+
+/* ---------- Repair what-if ---------- */
+.whatif-hint { margin: -4px 0 8px; font-size: 11px; }
+.repair li { cursor: pointer; padding-right: 34px; transition: background .15s, border-color .15s; }
+.repair li:hover { border-color: #b7dfc6; }
+.repair li.repair-on { background: var(--ok-soft); border-color: #9fd5b4; }
+.repair li:first-child:not(.repair-on) { background: #f8fafc; border-color: var(--line-soft); }
+.repair .repair-check { position: absolute; right: 10px; top: 10px; width: auto !important; margin: 0;
+  accent-color: var(--ok); pointer-events: none; }
+.whatif { margin: 0 0 14px; padding: 10px 12px; border-radius: 8px; background: var(--ok-soft); border: 1px solid #b7dfc6; }
+.whatif-row { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px;
+  color: var(--text-2); padding: 2px 0; }
+.whatif-row b { font-variant-numeric: tabular-nums; color: var(--ok); font-weight: 700; font-size: 13px; }
+.whatif .muted { margin: 6px 0 0; font-size: 10.5px; }
+.villages tr.v-reconnect td { background: var(--ok-soft); color: var(--ok); }

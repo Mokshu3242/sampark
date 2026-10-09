@@ -77,3 +77,9 @@ export function imageUrl(runId: string, name: string, width = 1400): string {
 export function chipUrl(runId: string, name: "s2_before" | "s2_after", lon: number, lat: number, sizeM = 2000): string {
   return `${API}/runs/${runId}/chip/${name}.png?lon=${lon.toFixed(5)}&lat=${lat.toFixed(5)}&size_m=${sizeM}&px=240`;
 }
+
+export function villageNamesFrom(field: any): string[] {
+  if (!field) return [];
+  if (Array.isArray(field)) return field.map((s) => String(s).trim()).filter(Boolean);
+  return String(field).split(",").map((s) => s.trim()).filter(Boolean);
+}

@@ -5,6 +5,7 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { imageBounds, imageUrl, layerUrl, traceFlow } from "../api/client";
 
 type Highlight = { name: string; lon: number; lat: number } | null;
+type WhatIf = { ranks: number[]; villagesGeo: any } | null;
 
 type Props = {
   runId: string | null;
@@ -16,6 +17,7 @@ type Props = {
   flowKm: number | null;
   onVillageSelect: (name: string) => void;
   highlight: Highlight;
+  whatIf: WhatIf;
   card: ReactNode; // pinned village card, shown in a popup on the map
 };
 
@@ -37,6 +39,8 @@ const FLOW_LAYERS = [
 const FLOW_SOURCES = ["flowpath", "flow-done", "flow-front", "flow-events"];
 const SELECT_LAYERS = ["selected-halo", "selected-ring"];
 const SELECT_SOURCE = "selected-village";
+const WHATIF_LAYERS = ["whatif-casing", "whatif-line", "reconnect-halo", "reconnect-dot"];
+const WHATIF_SOURCE = "whatif-villages";
 const ATTRIBUTION =
   "Contains modified Copernicus Sentinel data 2026 · Copernicus WorldDEM-30 © DLR e.V., © Airbus DS · © OpenStreetMap contributors";
 
@@ -74,8 +78,14 @@ function clearSelection(map: maplibregl.Map) {
   if (map.getSource(SELECT_SOURCE)) map.removeSource(SELECT_SOURCE);
 }
 
+function clearWhatIf(map: maplibregl.Map) {
+  for (const id of WHATIF_LAYERS) if (map.getLayer(id)) map.removeLayer(id);
+  if (map.getSource(WHATIF_SOURCE)) map.removeSource(WHATIF_SOURCE);
+}
+
 function clearRunLayers(map: maplibregl.Map) {
   clearFlow(map);
+  clearWhatIf(map);
   clearSelection(map);
   for (const n of RASTERS) {
     if (map.getLayer(`raster-${n}`)) map.removeLayer(`raster-${n}`);
@@ -85,6 +95,30 @@ function clearRunLayers(map: maplibregl.Map) {
     for (const id of ids) if (map.getLayer(id)) map.removeLayer(id);
   for (const name of VECTOR_LAYERS)
     if (map.getSource(`src-${name}`)) map.removeSource(`src-${name}`);
+}
+
+/** Highlight the ticked repair packages and the villages they bring back. */
+function applyWhatIf(map: maplibregl.Map, w: WhatIf) {
+  clearWhatIf(map);
+  // Fade the other packages while a what-if is active
+  if (map.getLayer("repair-line")) map.setPaintProperty("repair-line", "line-opacity", w ? 0.25 : 0.85);
+  if (!w || !map.getSource("src-repair")) return;
+  const before = map.getLayer("selected-halo") ? "selected-halo" : undefined;
+  const byRank: any = ["in", ["get", "rank"], ["literal", w.ranks]];
+
+  map.addLayer({ id: "whatif-casing", type: "line", source: "src-repair", filter: byRank,
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": "#004d40", "line-width": 15, "line-opacity": 0.8 } }, before);
+  map.addLayer({ id: "whatif-line", type: "line", source: "src-repair", filter: byRank,
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": "#00e676", "line-width": 9 } }, before);
+
+  map.addSource(WHATIF_SOURCE, { type: "geojson", data: w.villagesGeo });
+  map.addLayer({ id: "reconnect-halo", type: "circle", source: WHATIF_SOURCE,
+    paint: { "circle-radius": 14, "circle-color": "#00e676", "circle-opacity": 0.35, "circle-blur": 0.6 } }, before);
+  map.addLayer({ id: "reconnect-dot", type: "circle", source: WHATIF_SOURCE,
+    paint: { "circle-radius": 7, "circle-color": "#00e676",
+             "circle-stroke-color": "#004d40", "circle-stroke-width": 2 } }, before);
 }
 
 function addLayers(map: maplibregl.Map, name: string, src: string) {
@@ -228,7 +262,7 @@ function updateFlow(map: maplibregl.Map, r: any, km: number) {
 }
 
 export default function MapView({
-  runId, ready, bbox, visible, flowMode, onFlowResult, flowKm, onVillageSelect, highlight, card,
+  runId, ready, bbox, visible, flowMode, onFlowResult, flowKm, onVillageSelect, highlight, whatIf, card,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -246,6 +280,8 @@ export default function MapView({
   selectRef.current = onVillageSelect;
   const highlightRef = useRef<Highlight>(highlight);
   highlightRef.current = highlight;
+  const whatIfRef = useRef<WhatIf>(whatIf);
+  whatIfRef.current = whatIf;
 
   function fitToBox(animate: boolean) {
     const map = mapRef.current, b = bboxRef.current;
@@ -384,6 +420,14 @@ export default function MapView({
     if (!flowMode) { lastFlow.current = null; whenReady(map, () => clearFlow(map)); }
   }, [flowMode]);
 
+  // Repair what-if overlay
+  const whatIfKey = whatIf ? `${whatIf.ranks.join(",")}|${whatIf.villagesGeo?.features?.length ?? 0}` : "";
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    whenReady(map, () => applyWhatIf(map, whatIfRef.current));
+  }, [whatIfKey]);
+
   // Selected village: ring + pinned card popup next to the dot
   useEffect(() => {
     const map = mapRef.current;
@@ -476,8 +520,11 @@ export default function MapView({
         map.setLayoutProperty("raster-uncertainty", "visibility",
                               visibleRef.current.uncertainty ? "visible" : "none");
 
-      // Selection ring goes on top of everything
-      if (!cancelled) drawSelection(map, highlightRef.current);
+      // What-if overlay, then the selection ring on top of everything
+      if (!cancelled) {
+        applyWhatIf(map, whatIfRef.current);
+        drawSelection(map, highlightRef.current);
+      }
     });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
