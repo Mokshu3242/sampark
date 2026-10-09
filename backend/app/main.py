@@ -6,6 +6,7 @@ from app.core.config import settings
 from app.core.logging import setup_logging
 from app.core.run_registry import RunRegistry
 from app.api import routes_runs
+from app.api import routes_images
 
 setup_logging()
 log = logging.getLogger("flood-watch")
@@ -35,3 +36,4 @@ def version():
     return {"version": app.version, "env": settings.env}
 
 app.include_router(routes_runs.router)
+app.include_router(routes_images.router)

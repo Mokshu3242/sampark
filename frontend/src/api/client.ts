@@ -63,3 +63,13 @@ export async function traceFlow(runId: string, lon: number, lat: number, bufferM
   }
   return r.json();
 }
+
+export async function imageBounds(runId: string, name: string, width = 1400): Promise<number[][]> {
+  const r = await fetch(`${API}/runs/${runId}/image/${name}/bounds?width=${width}`);
+  if (!r.ok) throw new Error(await r.text());
+  return (await r.json()).coordinates;
+}
+
+export function imageUrl(runId: string, name: string, width = 1400): string {
+  return `${API}/runs/${runId}/image/${name}.png?width=${width}`;
+}
