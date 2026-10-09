@@ -19,49 +19,36 @@ const LAYER_IDS: Record<string, string[]> = {
   roads: ["roads-ok", "roads-affected", "roads-cut"],
   villages: ["villages-longer", "villages-cut"],
   repair: ["repair-line", "repair-label"],
+  uncertainty: ["raster-uncertainty"],
 };
+const VECTOR_LAYERS = ["debris", "flood", "roads", "villages", "repair"]; // drawing order
+const RASTERS = ["uncertainty", "dem", "s2_before", "s2_after"];
+const RASTER_WIDTH: Record<string, number> = { uncertainty: 2400 }; // class maps: keep 20 m detail
 const FLOW_LAYERS = [
-  "flowpath-ahead",
-  "flow-done-casing",
-  "flow-done",
-  "flow-events-glow",
-  "flow-events",
-  "flow-front-halo",
-  "flow-front",
+  "flowpath-ahead", "flow-done-casing", "flow-done", "flow-events-glow",
+  "flow-events", "flow-front-halo", "flow-front",
 ];
 const FLOW_SOURCES = ["flowpath", "flow-done", "flow-front", "flow-events"];
 const ATTRIBUTION =
   "Contains modified Copernicus Sentinel data 2026 · Copernicus WorldDEM-30 © DLR e.V., © Airbus DS · © OpenStreetMap contributors";
 
 const EVENT_COLOR: any = [
-  "match",
-  ["get", "kind"],
-  "bridge_lost",
-  "#ff1744",
-  "road_cut",
-  "#e53935",
-  "road_affected",
-  "#fbc02d",
-  "debris",
-  "#ef6c00",
-  "flood",
-  "#1565c0",
-  "village",
-  "#d500f9",
+  "match", ["get", "kind"],
+  "bridge_lost", "#ff1744",
+  "road_cut", "#e53935",
+  "road_affected", "#fbc02d",
+  "debris", "#ef6c00",
+  "flood", "#1565c0",
+  "village", "#d500f9",
   "#888",
 ];
 
 const loadedMaps = new WeakSet<maplibregl.Map>();
 const EMPTY: any = { type: "FeatureCollection", features: [] };
-const RASTERS = ["uncertainty", "dem", "s2_before", "s2_after"];
 
 function whenReady(map: maplibregl.Map, fn: () => void) {
   if (loadedMaps.has(map)) fn();
-  else
-    map.once("load", () => {
-      loadedMaps.add(map);
-      fn();
-    });
+  else map.once("load", () => { loadedMaps.add(map); fn(); });
 }
 
 function clearFlow(map: maplibregl.Map) {
@@ -70,117 +57,81 @@ function clearFlow(map: maplibregl.Map) {
 }
 
 function clearRunLayers(map: maplibregl.Map) {
+  clearFlow(map);
   for (const n of RASTERS) {
     if (map.getLayer(`raster-${n}`)) map.removeLayer(`raster-${n}`);
     if (map.getSource(`raster-${n}`)) map.removeSource(`raster-${n}`);
   }
-  clearFlow(map);
   for (const ids of Object.values(LAYER_IDS))
     for (const id of ids) if (map.getLayer(id)) map.removeLayer(id);
-  for (const name of Object.keys(LAYER_IDS))
+  for (const name of VECTOR_LAYERS)
     if (map.getSource(`src-${name}`)) map.removeSource(`src-${name}`);
 }
 
 function addLayers(map: maplibregl.Map, name: string, src: string) {
   switch (name) {
     case "flood":
-      map.addLayer({
-        id: "flood-fill",
-        type: "fill",
-        source: src,
-        paint: { "fill-color": "#1565c0", "fill-opacity": 0.55 },
-      });
+      map.addLayer({ id: "flood-fill", type: "fill", source: src,
+        paint: { "fill-color": "#1565c0", "fill-opacity": 0.55 } });
       break;
     case "debris":
-      map.addLayer({
-        id: "debris-fill",
-        type: "fill",
-        source: src,
-        paint: { "fill-color": "#ef6c00", "fill-opacity": 0.6 },
-      });
+      map.addLayer({ id: "debris-fill", type: "fill", source: src,
+        paint: { "fill-color": "#ef6c00", "fill-opacity": 0.6 } });
       break;
     case "roads":
-      map.addLayer({
-        id: "roads-ok",
-        type: "line",
-        source: src,
+      map.addLayer({ id: "roads-ok", type: "line", source: src,
         filter: ["==", ["get", "status"], "ok"],
-        paint: { "line-color": "#555", "line-width": 1, "line-opacity": 0.6 },
-      });
-      map.addLayer({
-        id: "roads-affected",
-        type: "line",
-        source: src,
+        paint: { "line-color": "#555", "line-width": 1, "line-opacity": 0.6 } });
+      map.addLayer({ id: "roads-affected", type: "line", source: src,
         filter: ["==", ["get", "status"], "affected"],
-        paint: { "line-color": "#fbc02d", "line-width": 2 },
-      });
-      map.addLayer({
-        id: "roads-cut",
-        type: "line",
-        source: src,
-        filter: [
-          "in",
-          ["get", "status"],
-          ["literal", ["likely_cut", "bridge_lost"]],
-        ],
-        paint: { "line-color": "#e53935", "line-width": 3.5 },
-      });
+        paint: { "line-color": "#fbc02d", "line-width": 2 } });
+      map.addLayer({ id: "roads-cut", type: "line", source: src,
+        filter: ["in", ["get", "status"], ["literal", ["likely_cut", "bridge_lost"]]],
+        paint: { "line-color": "#e53935", "line-width": 3.5 } });
       break;
     case "villages":
-      map.addLayer({
-        id: "villages-longer",
-        type: "circle",
-        source: src,
+      map.addLayer({ id: "villages-longer", type: "circle", source: src,
         filter: ["==", ["get", "status"], "longer_route"],
-        paint: {
-          "circle-radius": 6,
-          "circle-color": "#ffa726",
-          "circle-stroke-color": "#000",
-          "circle-stroke-width": 0.8,
-        },
-      });
-      map.addLayer({
-        id: "villages-cut",
-        type: "circle",
-        source: src,
+        paint: { "circle-radius": 6, "circle-color": "#ffa726",
+                 "circle-stroke-color": "#000", "circle-stroke-width": 0.8 } });
+      map.addLayer({ id: "villages-cut", type: "circle", source: src,
         filter: ["==", ["get", "status"], "cut_off"],
-        paint: {
-          "circle-radius": 7,
-          "circle-color": "#d500f9",
-          "circle-stroke-color": "#000",
-          "circle-stroke-width": 0.8,
-        },
-      });
+        paint: { "circle-radius": 7, "circle-color": "#d500f9",
+                 "circle-stroke-color": "#000", "circle-stroke-width": 0.8 } });
       break;
     case "repair":
-      map.addLayer({
-        id: "repair-line",
-        type: "line",
-        source: src,
-        paint: {
-          "line-color": "#00e676",
-          "line-width": 8,
-          "line-opacity": 0.85,
-        },
-      });
-      map.addLayer({
-        id: "repair-label",
-        type: "symbol",
-        source: src,
+      map.addLayer({ id: "repair-line", type: "line", source: src,
+        paint: { "line-color": "#00e676", "line-width": 8, "line-opacity": 0.85 } });
+      map.addLayer({ id: "repair-label", type: "symbol", source: src,
         layout: {
           "symbol-placement": "line-center",
           "text-field": ["concat", "#", ["to-string", ["get", "rank"]]],
-          "text-font": ["Noto Sans Bold"],
-          "text-size": 14,
-          "text-allow-overlap": true,
+          "text-font": ["Noto Sans Bold"], "text-size": 14, "text-allow-overlap": true,
         },
-        paint: {
-          "text-color": "#000",
-          "text-halo-color": "#00e676",
-          "text-halo-width": 2,
-        },
-      });
+        paint: { "text-color": "#000", "text-halo-color": "#00e676", "text-halo-width": 2 } });
       break;
+  }
+}
+
+/** Add a run raster (PNG from the image endpoint) as an image layer. */
+async function addRasterLayer(
+  map: maplibregl.Map, runId: string, name: string, opacity = 0.7, beforeId?: string,
+): Promise<boolean> {
+  const id = `raster-${name}`;
+  if (map.getSource(id)) return true;
+  const width = RASTER_WIDTH[name] ?? 1400;
+  try {
+    const coords = await imageBounds(runId, name, width);
+    if (map.getSource(id)) return true; // added while we waited
+    map.addSource(id, { type: "image", url: imageUrl(runId, name, width), coordinates: coords as any });
+    map.addLayer(
+      { id, type: "raster", source: id,
+        paint: { "raster-opacity": opacity, "raster-fade-duration": 200, "raster-resampling": "nearest" } },
+      beforeId && map.getLayer(beforeId) ? beforeId : undefined,
+    );
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -188,10 +139,7 @@ function addLayers(map: maplibregl.Map, name: string, src: string) {
 function sliceLine(coords: number[][], cum: number[], km: number) {
   const out: number[][] = [coords[0]];
   for (let i = 1; i < coords.length; i++) {
-    if (cum[i] <= km) {
-      out.push(coords[i]);
-      continue;
-    }
+    if (cum[i] <= km) { out.push(coords[i]); continue; }
     const seg = cum[i] - cum[i - 1];
     const f = seg > 0 ? (km - cum[i - 1]) / seg : 0;
     out.push([
@@ -206,103 +154,39 @@ function sliceLine(coords: number[][], cum: number[], km: number) {
 
 function drawFlow(map: maplibregl.Map, r: any) {
   clearFlow(map);
-  const path = r.path;
   const events = (r.corridor?.events || []).map((e: any) => ({
-    type: "Feature",
-    properties: e,
-    geometry: { type: "Point", coordinates: [e.lon, e.lat] },
+    type: "Feature", properties: e, geometry: { type: "Point", coordinates: [e.lon, e.lat] },
   }));
 
-  map.addSource("flowpath", { type: "geojson", data: path });
+  map.addSource("flowpath", { type: "geojson", data: r.path });
   map.addSource("flow-done", { type: "geojson", data: EMPTY });
   map.addSource("flow-front", { type: "geojson", data: EMPTY });
-  map.addSource("flow-events", {
-    type: "geojson",
-    data: { type: "FeatureCollection", features: events } as any,
-  });
+  map.addSource("flow-events", { type: "geojson",
+    data: { type: "FeatureCollection", features: events } as any });
 
-  map.addLayer({
-    id: "flowpath-ahead",
-    type: "line",
-    source: "flowpath",
+  map.addLayer({ id: "flowpath-ahead", type: "line", source: "flowpath",
     layout: { "line-cap": "round", "line-join": "round" },
-    paint: {
-      "line-color": "#00e5ff",
-      "line-width": 2.5,
-      "line-opacity": 0.35,
-      "line-dasharray": [2, 2],
-    },
-  });
-  map.addLayer({
-    id: "flow-done-casing",
-    type: "line",
-    source: "flow-done",
+    paint: { "line-color": "#00e5ff", "line-width": 2.5, "line-opacity": 0.35, "line-dasharray": [2, 2] } });
+  map.addLayer({ id: "flow-done-casing", type: "line", source: "flow-done",
     layout: { "line-cap": "round", "line-join": "round" },
-    paint: { "line-color": "#003a4d", "line-width": 8, "line-opacity": 0.5 },
-  });
-  map.addLayer({
-    id: "flow-done",
-    type: "line",
-    source: "flow-done",
+    paint: { "line-color": "#003a4d", "line-width": 8, "line-opacity": 0.5 } });
+  map.addLayer({ id: "flow-done", type: "line", source: "flow-done",
     layout: { "line-cap": "round", "line-join": "round" },
-    paint: { "line-color": "#00e5ff", "line-width": 4.5 },
-  });
-  map.addLayer({
-    id: "flow-events-glow",
-    type: "circle",
-    source: "flow-events",
+    paint: { "line-color": "#00e5ff", "line-width": 4.5 } });
+  map.addLayer({ id: "flow-events-glow", type: "circle", source: "flow-events",
+    filter: ["<", ["get", "km"], -1],
+    paint: { "circle-radius": 16, "circle-color": EVENT_COLOR, "circle-opacity": 0.35, "circle-blur": 0.6 } });
+  map.addLayer({ id: "flow-events", type: "circle", source: "flow-events",
     filter: ["<", ["get", "km"], -1],
     paint: {
-      "circle-radius": 16,
-      "circle-color": EVENT_COLOR,
-      "circle-opacity": 0.35,
-      "circle-blur": 0.6,
-    },
-  });
-  map.addLayer({
-    id: "flow-events",
-    type: "circle",
-    source: "flow-events",
-    filter: ["<", ["get", "km"], -1],
-    paint: {
-      "circle-radius": [
-        "match",
-        ["get", "kind"],
-        "village",
-        8,
-        "bridge_lost",
-        7,
-        "debris",
-        6,
-        5,
-      ],
-      "circle-color": EVENT_COLOR,
-      "circle-stroke-color": "#fff",
-      "circle-stroke-width": 1.2,
-    },
-  });
-  map.addLayer({
-    id: "flow-front-halo",
-    type: "circle",
-    source: "flow-front",
-    paint: {
-      "circle-radius": 18,
-      "circle-color": "#00e5ff",
-      "circle-opacity": 0.25,
-      "circle-blur": 0.5,
-    },
-  });
-  map.addLayer({
-    id: "flow-front",
-    type: "circle",
-    source: "flow-front",
-    paint: {
-      "circle-radius": 7,
-      "circle-color": "#ffffff",
-      "circle-stroke-color": "#00e5ff",
-      "circle-stroke-width": 3,
-    },
-  });
+      "circle-radius": ["match", ["get", "kind"], "village", 8, "bridge_lost", 7, "debris", 6, 5],
+      "circle-color": EVENT_COLOR, "circle-stroke-color": "#fff", "circle-stroke-width": 1.2,
+    } });
+  map.addLayer({ id: "flow-front-halo", type: "circle", source: "flow-front",
+    paint: { "circle-radius": 18, "circle-color": "#00e5ff", "circle-opacity": 0.25, "circle-blur": 0.5 } });
+  map.addLayer({ id: "flow-front", type: "circle", source: "flow-front",
+    paint: { "circle-radius": 7, "circle-color": "#ffffff",
+             "circle-stroke-color": "#00e5ff", "circle-stroke-width": 3 } });
 }
 
 function updateFlow(map: maplibregl.Map, r: any, km: number) {
@@ -311,54 +195,32 @@ function updateFlow(map: maplibregl.Map, r: any, km: number) {
   if (!coords || !cum || !map.getSource("flow-done")) return;
   const part = sliceLine(coords, cum, km);
   (map.getSource("flow-done") as maplibregl.GeoJSONSource).setData({
-    type: "Feature",
-    properties: {},
-    geometry: { type: "LineString", coordinates: part },
+    type: "Feature", properties: {}, geometry: { type: "LineString", coordinates: part },
   } as any);
   (map.getSource("flow-front") as maplibregl.GeoJSONSource).setData({
-    type: "Feature",
-    properties: {},
-    geometry: { type: "Point", coordinates: part[part.length - 1] },
+    type: "Feature", properties: {}, geometry: { type: "Point", coordinates: part[part.length - 1] },
   } as any);
   map.setFilter("flow-events", ["<=", ["get", "km"], km]);
-  map.setFilter("flow-events-glow", [
-    "all",
-    [">", ["get", "km"], km - 1.5],
-    ["<=", ["get", "km"], km],
-  ]);
-  const pulse = 16 + 5 * Math.sin(performance.now() / 180);
-  map.setPaintProperty("flow-front-halo", "circle-radius", pulse);
+  map.setFilter("flow-events-glow", ["all", [">", ["get", "km"], km - 1.5], ["<=", ["get", "km"], km]]);
+  map.setPaintProperty("flow-front-halo", "circle-radius", 16 + 5 * Math.sin(performance.now() / 180));
 }
 
-export default function MapView({
-  runId,
-  ready,
-  bbox,
-  visible,
-  flowMode,
-  onFlowResult,
-  flowKm,
-}: Props) {
+export default function MapView({ runId, ready, bbox, visible, flowMode, onFlowResult, flowKm }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const bboxRef = useRef<number[] | null>(null);
   const userMoved = useRef(false);
   const lastFlow = useRef<any>(null);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   const flowRef = useRef({ flowMode, runId, ready, onFlowResult });
   flowRef.current = { flowMode, runId, ready, onFlowResult };
 
   function fitToBox(animate: boolean) {
-    const map = mapRef.current,
-      b = bboxRef.current;
+    const map = mapRef.current, b = bboxRef.current;
     if (!map || !b) return;
     map.resize();
-    map.fitBounds(
-      [
-        [b[0], b[1]],
-        [b[2], b[3]],
-      ],
-      { padding: 40, duration: animate ? 600 : 0 },
-    );
+    map.fitBounds([[b[0], b[1]], [b[2], b[3]]], { padding: 40, duration: animate ? 600 : 0 });
   }
 
   // Init once
@@ -375,16 +237,9 @@ export default function MapView({
 
     map.addControl(new maplibregl.NavigationControl(), "top-right");
     map.addControl(new maplibregl.ScaleControl(), "bottom-left");
-    map.addControl(
-      new maplibregl.AttributionControl({
-        customAttribution: ATTRIBUTION,
-        compact: true,
-      }),
-    );
+    map.addControl(new maplibregl.AttributionControl({ customAttribution: ATTRIBUTION, compact: true }));
 
-    const markMoved = (e: any) => {
-      if (e.originalEvent) userMoved.current = true;
-    };
+    const markMoved = (e: any) => { if (e.originalEvent) userMoved.current = true; };
     map.on("dragstart", markMoved);
     map.on("zoomstart", markMoved);
     map.on("rotatestart", markMoved);
@@ -393,9 +248,7 @@ export default function MapView({
     const ro = new ResizeObserver(() => {
       map.resize();
       clearTimeout(t);
-      t = setTimeout(() => {
-        if (!userMoved.current) fitToBox(false);
-      }, 150);
+      t = setTimeout(() => { if (!userMoved.current) fitToBox(false); }, 150);
     });
     ro.observe(containerRef.current);
 
@@ -403,27 +256,16 @@ export default function MapView({
       map.on("click", id, (e) => {
         if (flowRef.current.flowMode) return;
         const p: any = e.features?.[0]?.properties || {};
-        const km = (v: any) =>
-          v === null || v === undefined || v === "null"
-            ? "no route"
-            : `${v} km`;
+        const km = (v: any) => (v === null || v === undefined || v === "null" ? "no route" : `${v} km`);
         new maplibregl.Popup()
           .setLngLat(e.lngLat)
-          .setHTML(
-            `<b>${p.name}</b><br>Status: ${p.status}<br>Buildings: ${p.buildings_total}<br>
+          .setHTML(`<b>${p.name}</b><br>Status: ${p.status}<br>Buildings: ${p.buildings_total}<br>
                     To help: ${km(p.dist_before_km)} → ${km(p.dist_after_km)}<br>
-                    Nearest road: ${p.road_snap_m} m`,
-          )
+                    Nearest road: ${p.road_snap_m} m`)
           .addTo(map);
       });
-      map.on("mouseenter", id, () => {
-        if (!flowRef.current.flowMode) map.getCanvas().style.cursor = "pointer";
-      });
-      map.on("mouseleave", id, () => {
-        map.getCanvas().style.cursor = flowRef.current.flowMode
-          ? "crosshair"
-          : "";
-      });
+      map.on("mouseenter", id, () => { if (!flowRef.current.flowMode) map.getCanvas().style.cursor = "pointer"; });
+      map.on("mouseleave", id, () => { map.getCanvas().style.cursor = flowRef.current.flowMode ? "crosshair" : ""; });
     }
 
     // Flow tracing click
@@ -445,16 +287,11 @@ export default function MapView({
         onFlowResult({ error: String(err.message || err) });
       } finally {
         busy = false;
-        map.getCanvas().style.cursor = flowRef.current.flowMode
-          ? "crosshair"
-          : "";
+        map.getCanvas().style.cursor = flowRef.current.flowMode ? "crosshair" : "";
       }
     });
 
-    map.once("load", () => {
-      loadedMaps.add(map);
-      map.resize();
-    });
+    map.once("load", () => { loadedMaps.add(map); map.resize(); });
 
     return () => {
       clearTimeout(t);
@@ -477,10 +314,7 @@ export default function MapView({
     const map = mapRef.current;
     if (!map) return;
     map.getCanvas().style.cursor = flowMode ? "crosshair" : "";
-    if (!flowMode) {
-      lastFlow.current = null;
-      whenReady(map, () => clearFlow(map));
-    }
+    if (!flowMode) { lastFlow.current = null; whenReady(map, () => clearFlow(map)); }
   }, [flowMode]);
 
   // Bbox outline + zoom
@@ -492,42 +326,24 @@ export default function MapView({
     userMoved.current = false;
     whenReady(map, () => {
       const data: any = {
-        type: "Feature",
-        properties: {},
-        geometry: {
-          type: "Polygon",
-          coordinates: [
-            [
-              [bbox[0], bbox[1]],
-              [bbox[2], bbox[1]],
-              [bbox[2], bbox[3]],
-              [bbox[0], bbox[3]],
-              [bbox[0], bbox[1]],
-            ],
-          ],
-        },
+        type: "Feature", properties: {},
+        geometry: { type: "Polygon", coordinates: [[
+          [bbox[0], bbox[1]], [bbox[2], bbox[1]], [bbox[2], bbox[3]], [bbox[0], bbox[3]], [bbox[0], bbox[1]],
+        ]] },
       };
       const src = map.getSource("bbox") as maplibregl.GeoJSONSource | undefined;
       if (src) src.setData(data);
       else {
         map.addSource("bbox", { type: "geojson", data });
-        map.addLayer({
-          id: "bbox",
-          type: "line",
-          source: "bbox",
-          paint: {
-            "line-color": "#00bcd4",
-            "line-width": 2,
-            "line-dasharray": [3, 3],
-          },
-        });
+        map.addLayer({ id: "bbox", type: "line", source: "bbox",
+          paint: { "line-color": "#00bcd4", "line-width": 2, "line-dasharray": [3, 3] } });
       }
       fitToBox(true);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bboxKey]);
 
-  // Run layers
+  // Run layers: vectors first, then rasters (so their stacking targets exist)
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
@@ -536,35 +352,32 @@ export default function MapView({
     whenReady(map, async () => {
       clearRunLayers(map);
       if (!runId || !ready) return;
-      for (const name of ["debris", "flood", "roads", "villages", "repair"]) {
+
+      for (const name of VECTOR_LAYERS) {
         try {
           const r = await fetch(layerUrl(runId, name));
           if (!r.ok || cancelled) continue;
           const data = await r.json();
           if (cancelled || map.getSource(`src-${name}`)) continue;
-          // keep flow layers on top
-          const before = map.getLayer("flowpath-ahead")
-            ? "flowpath-ahead"
-            : undefined;
           map.addSource(`src-${name}`, { type: "geojson", data });
           addLayers(map, name, `src-${name}`);
-          if (before)
-            for (const id of LAYER_IDS[name]) map.moveLayer(id, before);
+          const before = map.getLayer("flowpath-ahead") ? "flowpath-ahead" : undefined;
+          if (before) for (const id of LAYER_IDS[name]) map.moveLayer(id, before);
           for (const id of LAYER_IDS[name])
-            map.setLayoutProperty(
-              id,
-              "visibility",
-              visible[name] === false ? "none" : "visible",
-            );
+            map.setLayoutProperty(id, "visibility", visibleRef.current[name] === false ? "none" : "visible");
         } catch {
           /* layer missing for this run */
         }
       }
+
+      // Uncertainty: above flood/debris, below roads/villages/repair
+      if (cancelled) return;
+      const ok = await addRasterLayer(map, runId, "uncertainty", 0.9, "roads-ok");
+      if (ok && !cancelled && map.getLayer("raster-uncertainty"))
+        map.setLayoutProperty("raster-uncertainty", "visibility",
+                              visibleRef.current.uncertainty ? "visible" : "none");
     });
-    return () => {
-      cancelled = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    return () => { cancelled = true; };
   }, [runId, ready]);
 
   // Toggles
@@ -573,45 +386,8 @@ export default function MapView({
     if (!map) return;
     for (const [name, ids] of Object.entries(LAYER_IDS))
       for (const id of ids)
-        if (map.getLayer(id))
-          map.setLayoutProperty(
-            id,
-            "visibility",
-            visible[name] ? "visible" : "none",
-          );
+        if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", visible[name] ? "visible" : "none");
   }, [visible]);
 
   return <div ref={containerRef} className="map" />;
-}
-
-async function addRasterLayer(
-  map: maplibregl.Map,
-  runId: string,
-  name: string,
-  opacity = 0.7,
-  beforeId?: string,
-): Promise<boolean> {
-  const id = `raster-${name}`;
-  if (map.getSource(id)) return true;
-  try {
-    const coords = await imageBounds(runId, name);
-    if (map.getSource(id)) return true; // added while we waited
-    map.addSource(id, {
-      type: "image",
-      url: imageUrl(runId, name),
-      coordinates: coords as any,
-    });
-    map.addLayer(
-      {
-        id,
-        type: "raster",
-        source: id,
-        paint: { "raster-opacity": opacity, "raster-fade-duration": 200 },
-      },
-      beforeId && map.getLayer(beforeId) ? beforeId : undefined,
-    );
-    return true;
-  } catch {
-    return false;
-  }
 }

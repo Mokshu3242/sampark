@@ -16,7 +16,7 @@ export default function App() {
   const [run, setRun] = useState<RunInfo | null>(null);
   const [stats, setStats] = useState<any>(null);
   const [visible, setVisible] = useState<Record<string, boolean>>({
-    repair: true, flood: true, debris: true, roads: true, villages: true,
+    repair: true, flood: true, debris: true, roads: true, villages: true, uncertainty: false,
   });
   const [flowMode, setFlowMode] = useState(false);
   const [flowResult, setFlowResult] = useState<any>(null);
@@ -90,7 +90,11 @@ export default function App() {
           </div>
         )}
 
-        <LayerPanel visible={visible} onToggle={(n) => setVisible((v) => ({ ...v, [n]: !v[n] }))} />
+        <LayerPanel
+          visible={visible}
+          onToggle={(n) => setVisible((v) => ({ ...v, [n]: !v[n] }))}
+          uncertaintyHa={stats?.flood?.uncertainty_ha ?? null}
+        />
 
         {ready && (
           <FlowPanel
