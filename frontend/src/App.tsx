@@ -7,7 +7,6 @@ import CutoffList from "./components/CutoffList";
 import ChatBox from "./components/ChatBox";
 import FlowPanel from "./components/FlowPanel";
 import VillageSearch from "./components/VillageSearch";
-import VillageDetailCard from "./components/VillageDetailCard";
 import { exportUrl, getRun, getStats, layerUrl, reportUrl, type RunInfo } from "./api/client";
 import VillageCard from "./components/VillageCard";
 
@@ -160,14 +159,7 @@ export default function App() {
       </main>
 
       <aside className="right">
-        {selectedRow && (
-          <VillageDetailCard
-            village={selectedRow}
-            repairPlan={stats?.cutoff?.repair_plan ?? []}
-            onAskCopilot={onAsk}
-            onClose={() => setSelected(null)}
-          />
-        )}
+        
         <StatsPanel stats={stats} />
         <CutoffList stats={stats} onSelectVillage={onSelect} />
         <ChatBox key={runId ?? "none"} runId={ready ? runId : null}
