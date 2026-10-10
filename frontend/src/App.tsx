@@ -8,6 +8,7 @@ import ChatBox from "./components/ChatBox";
 import FlowPanel from "./components/FlowPanel";
 import VillageSearch from "./components/VillageSearch";
 import VillageCard from "./components/VillageCard";
+import ComparePanel from "./components/ComparePanel";
 import { exportUrl, getRun, getStats, layerUrl, reportUrl, villageNamesFrom, type RunInfo } from "./api/client";
 
 const STAGE_LABELS = ["Created", "Satellite data", "Flood map", "Damage", "Cut-off routing", "Done"];
@@ -29,6 +30,8 @@ export default function App() {
   const [selected, setSelected] = useState<string | null>(null);
   const [pendingQuestion, setPendingQuestion] = useState<string | null>(null);
   const [repairUpTo, setRepairUpTo] = useState(0); // 0 = nothing ticked
+  const [compareEnabled, setCompareEnabled] = useState(false);
+  const [compareValue, setCompareValue] = useState(0);
 
   const onFlowResult = useCallback((r: any) => setFlowResult(r), []);
   const onFlowKm = useCallback((km: number | null) => setFlowKm(km), []);
@@ -48,6 +51,7 @@ export default function App() {
     setRun(null); setStats(null); setVillageRows([]);
     setFlowMode(false); setFlowResult(null); setFlowKm(null);
     setSelected(null); setPendingQuestion(null); setRepairUpTo(0);
+    setCompareEnabled(false); setCompareValue(0);
     const tick = async () => {
       try {
         const r = await getRun(runId);
@@ -177,6 +181,15 @@ export default function App() {
         />
 
         {ready && (
+          <ComparePanel
+            enabled={compareEnabled}
+            onToggle={() => setCompareEnabled((v) => !v)}
+            value={compareValue}
+            onChange={setCompareValue}
+          />
+        )}
+
+        {ready && (
           <FlowPanel
             flowMode={flowMode}
             onToggle={() => { setFlowMode((m) => !m); setFlowResult(null); setFlowKm(null); }}
@@ -192,6 +205,7 @@ export default function App() {
           flowMode={flowMode} onFlowResult={onFlowResult} flowKm={flowKm}
           onVillageSelect={onSelect} highlight={highlight}
           whatIf={mapWhatIf}
+          compareEnabled={compareEnabled} compareValue={compareValue}
           card={selectedRow && runId ? (
             <VillageCard runId={runId} village={selectedRow}
                          repairPlan={stats?.cutoff?.repair_plan ?? []}

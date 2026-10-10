@@ -18,6 +18,8 @@ type Props = {
   onVillageSelect: (name: string) => void;
   highlight: Highlight;
   whatIf: WhatIf;
+  compareEnabled: boolean;
+  compareValue: number; // 0..100
   card: ReactNode; // pinned village card, shown in a popup on the map
 };
 
@@ -31,7 +33,9 @@ const LAYER_IDS: Record<string, string[]> = {
 };
 const VECTOR_LAYERS = ["debris", "flood", "roads", "villages", "repair"]; // drawing order
 const RASTERS = ["uncertainty", "dem", "s2_before", "s2_after"];
+const COMPARE = ["s2_before", "s2_after"];
 const RASTER_WIDTH: Record<string, number> = { uncertainty: 2400 }; // class maps: keep 20 m detail
+const RASTER_SHARP = new Set(["uncertainty"]);                    // class maps: no blending
 const FLOW_LAYERS = [
   "flowpath-ahead", "flow-done-casing", "flow-done", "flow-events-glow",
   "flow-events", "flow-front-halo", "flow-front",
@@ -83,24 +87,43 @@ function clearWhatIf(map: maplibregl.Map) {
   if (map.getSource(WHATIF_SOURCE)) map.removeSource(WHATIF_SOURCE);
 }
 
+function removeRaster(map: maplibregl.Map, name: string) {
+  if (map.getLayer(`raster-${name}`)) map.removeLayer(`raster-${name}`);
+  if (map.getSource(`raster-${name}`)) map.removeSource(`raster-${name}`);
+}
+
 function clearRunLayers(map: maplibregl.Map) {
   clearFlow(map);
   clearWhatIf(map);
   clearSelection(map);
-  for (const n of RASTERS) {
-    if (map.getLayer(`raster-${n}`)) map.removeLayer(`raster-${n}`);
-    if (map.getSource(`raster-${n}`)) map.removeSource(`raster-${n}`);
-  }
+  for (const n of RASTERS) removeRaster(map, n);
   for (const ids of Object.values(LAYER_IDS))
     for (const id of ids) if (map.getLayer(id)) map.removeLayer(id);
   for (const name of VECTOR_LAYERS)
     if (map.getSource(`src-${name}`)) map.removeSource(`src-${name}`);
 }
 
+/** First basemap label layer. Imagery goes under it, so town names stay readable. */
+function firstBasemapLabel(map: maplibregl.Map): string | undefined {
+  const ours = /^(repair|flow|selected|reconnect|whatif|villages|roads|flood|debris|raster|bbox)/;
+  return map.getStyle().layers?.find((l) => l.type === "symbol" && !ours.test(l.id))?.id;
+}
+
+/** Fade: before = 1 - v, after = v. Hidden when compare is off. */
+function applyCompare(map: maplibregl.Map, on: boolean, value: number) {
+  const v = Math.max(0, Math.min(100, value)) / 100;
+  const ops: [string, number][] = [["s2_before", 1 - v], ["s2_after", v]];
+  for (const [n, op] of ops) {
+    const id = `raster-${n}`;
+    if (!map.getLayer(id)) continue;
+    map.setLayoutProperty(id, "visibility", on && op > 0.001 ? "visible" : "none");
+    map.setPaintProperty(id, "raster-opacity", op);
+  }
+}
+
 /** Highlight the ticked repair packages and the villages they bring back. */
 function applyWhatIf(map: maplibregl.Map, w: WhatIf) {
   clearWhatIf(map);
-  // Fade the other packages while a what-if is active
   if (map.getLayer("repair-line")) map.setPaintProperty("repair-line", "line-opacity", w ? 0.25 : 0.85);
   if (!w || !map.getSource("src-repair")) return;
   const before = map.getLayer("selected-halo") ? "selected-halo" : undefined;
@@ -179,7 +202,11 @@ async function addRasterLayer(
     map.addSource(id, { type: "image", url: imageUrl(runId, name, width), coordinates: coords as any });
     map.addLayer(
       { id, type: "raster", source: id,
-        paint: { "raster-opacity": opacity, "raster-fade-duration": 200, "raster-resampling": "nearest" } },
+        paint: {
+          "raster-opacity": opacity,
+          "raster-fade-duration": 200,
+          "raster-resampling": RASTER_SHARP.has(name) ? "nearest" : "linear",
+        } },
       beforeId && map.getLayer(beforeId) ? beforeId : undefined,
     );
     return true;
@@ -217,7 +244,6 @@ function drawFlow(map: maplibregl.Map, r: any) {
   map.addSource("flow-events", { type: "geojson",
     data: { type: "FeatureCollection", features: events } as any });
 
-  // Draw flow under the selection ring, if there is one
   const before = map.getLayer("selected-halo") ? "selected-halo" : undefined;
 
   map.addLayer({ id: "flowpath-ahead", type: "line", source: "flowpath",
@@ -262,7 +288,8 @@ function updateFlow(map: maplibregl.Map, r: any, km: number) {
 }
 
 export default function MapView({
-  runId, ready, bbox, visible, flowMode, onFlowResult, flowKm, onVillageSelect, highlight, whatIf, card,
+  runId, ready, bbox, visible, flowMode, onFlowResult, flowKm, onVillageSelect,
+  highlight, whatIf, compareEnabled, compareValue, card,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -282,6 +309,8 @@ export default function MapView({
   highlightRef.current = highlight;
   const whatIfRef = useRef<WhatIf>(whatIf);
   whatIfRef.current = whatIf;
+  const compareRef = useRef({ on: compareEnabled, value: compareValue });
+  compareRef.current = { on: compareEnabled, value: compareValue };
 
   function fitToBox(animate: boolean) {
     const map = mapRef.current, b = bboxRef.current;
@@ -428,6 +457,31 @@ export default function MapView({
     whenReady(map, () => applyWhatIf(map, whatIfRef.current));
   }, [whatIfKey]);
 
+  // Before/after: load the two images the first time compare is turned on
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready || !runId) return;
+    let cancelled = false;
+    whenReady(map, async () => {
+      if (compareEnabled) {
+        const below = firstBasemapLabel(map);
+        for (const n of COMPARE) {
+          await addRasterLayer(map, runId, n, 0, below);
+          if (cancelled) { removeRaster(map, n); return; }   // run changed while loading
+        }
+      }
+      applyCompare(map, compareRef.current.on, compareRef.current.value);
+    });
+    return () => { cancelled = true; };
+  }, [compareEnabled, ready, runId]);
+
+  // Before/after: slider moves
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    whenReady(map, () => applyCompare(map, compareEnabled, compareValue));
+  }, [compareValue, compareEnabled]);
+
   // Selected village: ring + pinned card popup next to the dot
   useEffect(() => {
     const map = mapRef.current;
@@ -448,8 +502,7 @@ export default function MapView({
         .addTo(map);
       setCardEl(el);
 
-      userMoved.current = true; // don't snap back to the run box on resize
-      // Put the dot low on screen so the card above it fits
+      userMoved.current = true;
       map.flyTo({
         center: [highlight.lon, highlight.lat],
         zoom: Math.max(map.getZoom(), 12.5),

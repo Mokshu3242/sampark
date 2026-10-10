@@ -1,0 +1,8 @@
+# Window 1: backend
+cd E:\Education\Practical\Multimodal\flood-watch\backend
+.venv\Scripts\Activate.ps1
+uvicorn app.main:app --reload
+
+# Window 2: frontend
+cd E:\Education\Practical\Multimodal\flood-watch\frontend
+npm run dev
