@@ -6,6 +6,14 @@ import { imageBounds, imageUrl, layerUrl, traceFlow } from "../api/client";
 
 type Highlight = { name: string; lon: number; lat: number } | null;
 type WhatIf = { ranks: number[]; villagesGeo: any } | null;
+export type CameraTarget = {
+  key: number;
+  fit?: boolean;
+  lon?: number; lat?: number; zoom?: number;
+  pitch?: number; bearing?: number;
+  duration: number;
+  linear?: boolean;
+};
 
 type Props = {
   runId: string | null;
@@ -15,12 +23,15 @@ type Props = {
   flowMode: boolean;
   onFlowResult: (r: any) => void;
   flowKm: number | null;
+  flowData: any;                 // a traced flow (from a click or from story mode)
   onVillageSelect: (name: string) => void;
   highlight: Highlight;
   whatIf: WhatIf;
   compareEnabled: boolean;
-  compareValue: number; // 0..100
-  card: ReactNode; // pinned village card, shown in a popup on the map
+  compareValue: number;          // 0..100
+  relief: boolean;               // hillshade on top of imagery (story mode)
+  cameraTarget: CameraTarget | null;
+  card: ReactNode;               // pinned village card, shown in a popup on the map
 };
 
 const LAYER_IDS: Record<string, string[]> = {
@@ -288,8 +299,8 @@ function updateFlow(map: maplibregl.Map, r: any, km: number) {
 }
 
 export default function MapView({
-  runId, ready, bbox, visible, flowMode, onFlowResult, flowKm, onVillageSelect,
-  highlight, whatIf, compareEnabled, compareValue, card,
+  runId, ready, bbox, visible, flowMode, onFlowResult, flowKm, flowData, onVillageSelect,
+  highlight, whatIf, compareEnabled, compareValue, relief, cameraTarget, card,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -311,6 +322,8 @@ export default function MapView({
   whatIfRef.current = whatIf;
   const compareRef = useRef({ on: compareEnabled, value: compareValue });
   compareRef.current = { on: compareEnabled, value: compareValue };
+  const flowDataRef = useRef(flowData);
+  flowDataRef.current = flowData;
 
   function fitToBox(animate: boolean) {
     const map = mapRef.current, b = bboxRef.current;
@@ -342,6 +355,7 @@ export default function MapView({
       style: "https://tiles.openfreemap.org/styles/liberty",
       center: [85.3, 28.1],
       zoom: 9,
+      maxPitch: 70,
       attributionControl: false,
     });
     mapRef.current = map;
@@ -434,6 +448,26 @@ export default function MapView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // A traced flow passed in (story mode, or echo of our own click)
+  const flowKey = flowData?.path?.geometry?.coordinates?.length
+    ? `${flowData.path.properties?.start_lon},${flowData.path.properties?.start_lat},${flowData.path.geometry.coordinates.length}`
+    : "";
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    whenReady(map, () => {
+      const r = flowDataRef.current;
+      if (!flowKey) {
+        if (!r?.busy) { lastFlow.current = null; clearFlow(map); }
+        return;
+      }
+      if (lastFlow.current === r) return;      // already drawn by our click handler
+      lastFlow.current = r;
+      drawFlow(map, r);
+      updateFlow(map, r, 0);
+    });
+  }, [flowKey]);
+
   // Wave front progress
   useEffect(() => {
     const map = mapRef.current;
@@ -446,7 +480,7 @@ export default function MapView({
     const map = mapRef.current;
     if (!map) return;
     map.getCanvas().style.cursor = flowMode ? "crosshair" : "";
-    if (!flowMode) { lastFlow.current = null; whenReady(map, () => clearFlow(map)); }
+    if (!flowMode && !flowDataRef.current?.path) { lastFlow.current = null; whenReady(map, () => clearFlow(map)); }
   }, [flowMode]);
 
   // Repair what-if overlay
@@ -469,6 +503,8 @@ export default function MapView({
           await addRasterLayer(map, runId, n, 0, below);
           if (cancelled) { removeRaster(map, n); return; }   // run changed while loading
         }
+        // Keep the relief shading above the imagery
+        if (map.getLayer("raster-dem")) map.moveLayer("raster-dem", below && map.getLayer(below) ? below : undefined);
       }
       applyCompare(map, compareRef.current.on, compareRef.current.value);
     });
@@ -481,6 +517,48 @@ export default function MapView({
     if (!map) return;
     whenReady(map, () => applyCompare(map, compareEnabled, compareValue));
   }, [compareValue, compareEnabled]);
+
+  // Relief: hillshade over the imagery, under the labels
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready || !runId) return;
+    let cancelled = false;
+    whenReady(map, async () => {
+      if (relief) {
+        await addRasterLayer(map, runId, "dem", 0.35, firstBasemapLabel(map));
+        if (cancelled) return;
+      }
+      if (map.getLayer("raster-dem")) map.setLayoutProperty("raster-dem", "visibility", relief ? "visible" : "none");
+    });
+    return () => { cancelled = true; };
+  }, [relief, ready, runId]);
+
+  // Camera moves (story mode)
+  useEffect(() => {
+    const map = mapRef.current;
+    const c = cameraTarget;
+    if (!map || !c) return;
+    whenReady(map, () => {
+      if (c.fit) {
+        const b = bboxRef.current;
+        if (!b) return;
+        const cam = map.cameraForBounds([[b[0], b[1]], [b[2], b[3]]], { padding: 40 });
+        userMoved.current = false;
+        map.easeTo({
+          center: cam?.center ?? map.getCenter(), zoom: cam?.zoom ?? map.getZoom(),
+          pitch: c.pitch ?? 0, bearing: c.bearing ?? 0, duration: c.duration, essential: true,
+        });
+        return;
+      }
+      userMoved.current = true;
+      map.easeTo({
+        center: [c.lon!, c.lat!], zoom: c.zoom, pitch: c.pitch ?? 0, bearing: c.bearing ?? 0,
+        duration: c.duration, essential: true,
+        ...(c.linear ? { easing: (x: number) => x } : {}),
+      });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cameraTarget?.key]);
 
   // Selected village: ring + pinned card popup next to the dot
   useEffect(() => {

@@ -43,6 +43,7 @@ class FlowRequest(BaseModel):
     lon: float
     lat: float
     buffer_m: float = 500.0
+    snap_px: int = 5
 
 def _run_dir(run_id: str):
     d = settings.runs_dir / run_id
@@ -199,10 +200,10 @@ def get_eval(run_id: str):
 @router.post("/{run_id}/flowpath")
 def flowpath(run_id: str, body: FlowRequest):
     run_dir = _run_dir(run_id)
-    if not (100 <= body.buffer_m <= 3000):
-        raise HTTPException(400, "buffer_m must be 100 to 3000")
+    if not (1 <= body.snap_px <= 50):
+        raise HTTPException(400, "snap_px must be 1 to 50")
     try:
-        feature = trace_flow(run_dir, body.lon, body.lat)
+        feature = trace_flow(run_dir, body.lon, body.lat, body.snap_px)
     except ValueError as e:
         raise HTTPException(400, str(e))
     except RuntimeError as e:

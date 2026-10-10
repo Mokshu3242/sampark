@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import MapView from "./components/MapView";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import MapView, { type CameraTarget } from "./components/MapView";
 import RunForm from "./components/RunForm";
 import LayerPanel from "./components/LayerPanel";
 import StatsPanel from "./components/StatsPanel";
@@ -9,11 +9,25 @@ import FlowPanel from "./components/FlowPanel";
 import VillageSearch from "./components/VillageSearch";
 import VillageCard from "./components/VillageCard";
 import ComparePanel from "./components/ComparePanel";
-import { exportUrl, getRun, getStats, layerUrl, reportUrl, villageNamesFrom, type RunInfo } from "./api/client";
+import StoryPanel from "./components/StoryPanel";
+import StoryOverlay from "./components/StoryOverlay";
+import { buildStory, type StoryAction, type StoryStep } from "./story/story";
+import { primeVoices, speak, startRiver, stopRiver, stopSpeaking } from "./story/speak";
+import {
+  exportUrl, getRun, getStats, imageUrl, layerUrl, reportUrl, traceFlow, villageNamesFrom, type RunInfo,
+} from "./api/client";
 
 const STAGE_LABELS = ["Created", "Satellite data", "Flood map", "Damage", "Cut-off routing", "Done"];
 const same = (a: any, b: any) => String(a ?? "").toLowerCase() === String(b ?? "").toLowerCase();
 const low = (s: any) => String(s ?? "").toLowerCase();
+const ease = (x: number) => (x < 0.5 ? 2 * x * x : 1 - Math.pow(-2 * x + 2, 2) / 2);
+
+type Tween = { from: number; to: number; t0: number; dur: number };
+type StoryState = {
+  start: number; steps: StoryStep[]; total: number; fired: Set<number>;
+  tweens: Tween[]; cmp: number; flow: any; raf: number; lastUi: number;
+  snap: { visible: Record<string, boolean>; compareEnabled: boolean; compareValue: number; repairUpTo: number };
+};
 
 export default function App() {
   const [runId, setRunId] = useState<string | null>(null);
@@ -33,6 +47,22 @@ export default function App() {
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [compareValue, setCompareValue] = useState(0);
 
+  // Story mode
+  const [storyRunning, setStoryRunning] = useState(false);
+  const [storyLoading, setStoryLoading] = useState(false);
+  const [storyProgress, setStoryProgress] = useState(0);
+  const [storyVoice, setStoryVoice] = useState(false);
+  const [storyRiver, setStoryRiver] = useState(false);
+  const [caption, setCaption] = useState("");
+  const [cameraTarget, setCameraTarget] = useState<CameraTarget | null>(null);
+  const [relief, setRelief] = useState(false);
+  const storyRef = useRef<StoryState | null>(null);
+  const camKey = useRef(0);
+  const voiceRef = useRef(storyVoice);
+  voiceRef.current = storyVoice;
+  const liveRef = useRef({ visible, compareEnabled, compareValue, repairUpTo });
+  liveRef.current = { visible, compareEnabled, compareValue, repairUpTo };
+
   const onFlowResult = useCallback((r: any) => setFlowResult(r), []);
   const onFlowKm = useCallback((km: number | null) => setFlowKm(km), []);
   const onSelect = useCallback((name: string) => setSelected(name), []);
@@ -45,9 +75,22 @@ export default function App() {
   const ready = !!run?.ready && !failed;
   const running = !!runId && !ready && !failed;
 
+  /** Stop the story loop and sound. Does not restore the map (callers decide). */
+  const haltStory = useCallback(() => {
+    if (storyRef.current) cancelAnimationFrame(storyRef.current.raf);
+    stopSpeaking();
+    stopRiver();
+    setStoryRunning(false);
+    setStoryLoading(false);
+    setCaption("");
+    setRelief(false);
+  }, []);
+
   useEffect(() => {
     if (!runId) return;
     let cancelled = false;
+    haltStory();
+    storyRef.current = null;
     setRun(null); setStats(null); setVillageRows([]);
     setFlowMode(false); setFlowResult(null); setFlowKm(null);
     setSelected(null); setPendingQuestion(null); setRepairUpTo(0);
@@ -77,7 +120,9 @@ export default function App() {
     };
     tick();
     return () => { cancelled = true; };
-  }, [runId, reload]);
+  }, [runId, reload, haltStory]);
+
+  useEffect(() => () => { haltStory(); }, [haltStory]);
 
   // Villages + their damage numbers from damage_stats
   const villages = useMemo(() => {
@@ -135,91 +180,227 @@ export default function App() {
     [whatIf],
   );
 
+  // ---------- Story mode ----------
+  function runAction(s: StoryState, a: StoryAction, t: number) {
+    switch (a.kind) {
+      case "camera":
+        setCameraTarget({ ...a, key: ++camKey.current });
+        break;
+      case "fit":
+        setCameraTarget({ fit: true, pitch: a.pitch, duration: a.duration, key: ++camKey.current });
+        break;
+      case "compare":
+        setCompareEnabled(a.on);
+        if (a.value != null) { s.cmp = a.value; setCompareValue(a.value); }
+        break;
+      case "compareFade":
+        s.tweens.push({ from: s.cmp, to: a.to, t0: t, dur: a.dur });
+        break;
+      case "layer":
+        setVisible((v) => ({ ...v, [a.name]: a.on }));
+        break;
+      case "relief":
+        setRelief(a.on);
+        break;
+      case "flow":
+        if (s.flow) setFlowResult(s.flow);   // FlowPanel plays the wave
+        break;
+      case "repairUpTo":
+        setRepairUpTo(a.value);
+        break;
+    }
+  }
+
+  const endStory = useCallback(() => {
+    const s = storyRef.current;
+    haltStory();
+    if (s) {
+      setVisible(s.snap.visible);
+      setCompareEnabled(s.snap.compareEnabled);
+      setCompareValue(s.snap.compareValue);
+      setRepairUpTo(s.snap.repairUpTo);
+    }
+    storyRef.current = null;
+    setFlowResult(null);
+    setFlowKm(null);
+    setCameraTarget({ fit: true, pitch: 0, duration: 1200, key: ++camKey.current });
+  }, [haltStory]);
+
+  const startStory = useCallback(async () => {
+    if (!stats || !run || !runId || storyLoading) return;
+    // Sound must start inside the click
+    if (storyRiver) startRiver();
+    primeVoices();
+    setStoryLoading(true);
+    setSelected(null);
+    setFlowMode(false);
+
+    // Warm the image cache so "before" is ready when its step plays
+    for (const n of ["s2_before", "s2_after"]) { const img = new Image(); img.src = imageUrl(runId, n); }
+
+    const bbox = run.request?.bbox as number[];
+    const located = villages.filter((v) => Number.isFinite(v._lon) && Number.isFinite(v._lat));
+    const cut = located.filter((v) => v.status === "cut_off");
+    const pool = cut.length ? cut : located;
+    const top = pool.length ? pool.reduce((a, b) => (b._lat > a._lat ? b : a)) : null;
+    const mid = cut.length
+      ? { lon: cut.reduce((s, v) => s + v._lon, 0) / cut.length, lat: cut.reduce((s, v) => s + v._lat, 0) / cut.length }
+      : { lon: (bbox[0] + bbox[2]) / 2, lat: (bbox[1] + bbox[3]) / 2 };
+    const p1 = stats?.cutoff?.repair_plan?.[0];
+    const repV = p1 ? located.find((v) => same(v.name, p1.near)) : null;
+
+    let flow: any = null;
+    if (top) {
+      try { flow = await traceFlow(runId, top._lon, top._lat, 500, 25); } catch { flow = null; }
+    }
+    const end = flow?.path?.geometry?.coordinates?.slice(-1)?.[0];
+
+    const { steps, total } = buildStory({
+      date: run.request?.flood_date,
+      stats,
+      mid,
+      top: top ? { lon: top._lon, lat: top._lat, name: top.name } : null,
+      flowEnd: end ? { lon: end[0], lat: end[1] } : null,
+      hasFlow: !!flow?.path,
+      repairPt: repV ? { lon: repV._lon, lat: repV._lat } : null,
+    });
+
+    const s: StoryState = {
+      start: performance.now(), steps, total, fired: new Set(), tweens: [], cmp: 0, flow, raf: 0, lastUi: 0,
+      snap: { ...liveRef.current },
+    };
+    storyRef.current = s;
+    setStoryLoading(false);
+    setStoryProgress(0);
+    setStoryRunning(true);
+
+    const loop = (now: number) => {
+      if (storyRef.current !== s) return;            // stopped or replaced
+      const t = (now - s.start) / 1000;
+      s.steps.forEach((st, i) => {
+        if (s.fired.has(i) || t < st.at) return;
+        s.fired.add(i);
+        setCaption(st.caption);
+        if (voiceRef.current) speak(st.caption);
+        for (const a of st.actions ?? []) runAction(s, a, t);
+      });
+      s.tweens = s.tweens.filter((tw) => {
+        const f = Math.min(1, (t - tw.t0) / tw.dur);
+        s.cmp = tw.from + (tw.to - tw.from) * ease(f);
+        setCompareValue(s.cmp);
+        return f < 1;
+      });
+      if (now - s.lastUi > 100) { s.lastUi = now; setStoryProgress(t / s.total); }
+      if (t >= s.total) { endStory(); return; }
+      s.raf = requestAnimationFrame(loop);
+    };
+    s.raf = requestAnimationFrame(loop);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stats, run, runId, villages, storyRiver, storyLoading, endStory]);
+
   const stageIdx = ready ? 5 : Math.max(0, run?.stage_index ?? 0);
 
   return (
-    <div className="app">
-      <aside className="left">
-        <header>
-          <h1>Flood Watch</h1>
-          <p className="muted">Satellite flood damage and road access · educational prototype</p>
-        </header>
+    <>
+      <div className={`app ${storyRunning ? "cinema" : ""}`}>
+        <aside className="left">
+          <header>
+            <h1>Flood Watch</h1>
+            <p className="muted">Satellite flood damage and road access · educational prototype</p>
+          </header>
 
-        <div className="disclaimer">
-          Educational prototype, not an operational tool. Results are satellite estimates and are not field-verified.
-        </div>
-
-        <RunForm onSelect={(id) => { setRunId(id); setReload((n) => n + 1); }} disabled={running} />
-
-        {runId && (
-          <div className="panel">
-            <h2>Run {runId}</h2>
-            <div className="progress">
-              {STAGE_LABELS.slice(1).map((l, i) => (
-                <div key={l} className={`step ${ready || i + 1 < stageIdx ? "done" : i + 1 === stageIdx ? "active" : ""}`}>{l}</div>
-              ))}
-            </div>
-            <div className="status">{failed ? `Failed: ${run?.detail}` : run?.detail || "starting…"}</div>
-            {run?.quality && <div className="muted">Data quality: <b>{run.quality.badge}</b>
-              {" "}· radar {run.quality.s1?.before_date} → {run.quality.s1?.after_date}</div>}
-            {ready && (
-              <div className="actions">
-                <a href={reportUrl(runId, "en")} target="_blank" rel="noreferrer">Report (EN)</a>
-                <a href={reportUrl(runId, "ne")} target="_blank" rel="noreferrer">Report (नेपाली)</a>
-                <a href={exportUrl(runId)}>Download data</a>
-              </div>
-            )}
+          <div className="disclaimer">
+            Educational prototype, not an operational tool. Results are satellite estimates and are not field-verified.
           </div>
-        )}
 
-        {ready && villages.length > 0 && <VillageSearch villages={villages} onSelect={onSelect} />}
+          <RunForm onSelect={(id) => { setRunId(id); setReload((n) => n + 1); }} disabled={running} />
 
-        <LayerPanel
-          visible={visible}
-          onToggle={(n) => setVisible((v) => ({ ...v, [n]: !v[n] }))}
-          uncertaintyHa={stats?.flood?.uncertainty_ha ?? null}
-        />
+          {runId && (
+            <div className="panel">
+              <h2>Run {runId}</h2>
+              <div className="progress">
+                {STAGE_LABELS.slice(1).map((l, i) => (
+                  <div key={l} className={`step ${ready || i + 1 < stageIdx ? "done" : i + 1 === stageIdx ? "active" : ""}`}>{l}</div>
+                ))}
+              </div>
+              <div className="status">{failed ? `Failed: ${run?.detail}` : run?.detail || "starting…"}</div>
+              {run?.quality && <div className="muted">Data quality: <b>{run.quality.badge}</b>
+                {" "}· radar {run.quality.s1?.before_date} → {run.quality.s1?.after_date}</div>}
+              {ready && (
+                <div className="actions">
+                  <a href={reportUrl(runId, "en")} target="_blank" rel="noreferrer">Report (EN)</a>
+                  <a href={reportUrl(runId, "ne")} target="_blank" rel="noreferrer">Report (नेपाली)</a>
+                  <a href={exportUrl(runId)}>Download data</a>
+                </div>
+              )}
+            </div>
+          )}
 
-        {ready && (
-          <ComparePanel
-            enabled={compareEnabled}
-            onToggle={() => setCompareEnabled((v) => !v)}
-            value={compareValue}
-            onChange={setCompareValue}
+          {ready && (
+            <StoryPanel
+              running={storyRunning}
+              loading={storyLoading}
+              voice={storyVoice}
+              river={storyRiver}
+              onToggleVoice={() => setStoryVoice((v) => !v)}
+              onToggleRiver={() => setStoryRiver((v) => !v)}
+              onStart={startStory}
+              onStop={endStory}
+            />
+          )}
+
+          {ready && villages.length > 0 && <VillageSearch villages={villages} onSelect={onSelect} />}
+
+          <LayerPanel
+            visible={visible}
+            onToggle={(n) => setVisible((v) => ({ ...v, [n]: !v[n] }))}
+            uncertaintyHa={stats?.flood?.uncertainty_ha ?? null}
           />
-        )}
 
-        {ready && (
-          <FlowPanel
-            flowMode={flowMode}
-            onToggle={() => { setFlowMode((m) => !m); setFlowResult(null); setFlowKm(null); }}
-            result={flowResult}
-            onKm={onFlowKm}
+          {ready && (
+            <ComparePanel
+              enabled={compareEnabled}
+              onToggle={() => setCompareEnabled((v) => !v)}
+              value={compareValue}
+              onChange={setCompareValue}
+            />
+          )}
+
+          {ready && (
+            <FlowPanel
+              flowMode={flowMode}
+              onToggle={() => { setFlowMode((m) => !m); setFlowResult(null); setFlowKm(null); }}
+              result={flowResult}
+              onKm={onFlowKm}
+            />
+          )}
+        </aside>
+
+        <main className="map-wrap">
+          <MapView
+            runId={runId} ready={ready} bbox={run?.request?.bbox ?? null} visible={visible}
+            flowMode={flowMode} onFlowResult={onFlowResult} flowKm={flowKm} flowData={flowResult}
+            onVillageSelect={onSelect} highlight={highlight}
+            whatIf={mapWhatIf}
+            compareEnabled={compareEnabled} compareValue={compareValue}
+            relief={relief} cameraTarget={cameraTarget}
+            card={selectedRow && runId ? (
+              <VillageCard runId={runId} village={selectedRow}
+                           repairPlan={stats?.cutoff?.repair_plan ?? []}
+                           onClose={() => setSelected(null)} />
+            ) : null}
           />
-        )}
-      </aside>
+        </main>
 
-      <main className="map-wrap">
-        <MapView
-          runId={runId} ready={ready} bbox={run?.request?.bbox ?? null} visible={visible}
-          flowMode={flowMode} onFlowResult={onFlowResult} flowKm={flowKm}
-          onVillageSelect={onSelect} highlight={highlight}
-          whatIf={mapWhatIf}
-          compareEnabled={compareEnabled} compareValue={compareValue}
-          card={selectedRow && runId ? (
-            <VillageCard runId={runId} village={selectedRow}
-                         repairPlan={stats?.cutoff?.repair_plan ?? []}
-                         onClose={() => setSelected(null)} />
-          ) : null}
-        />
-      </main>
+        <aside className="right">
+          <StatsPanel stats={stats} />
+          <CutoffList stats={stats} whatIf={whatIf} onToggleRank={onToggleRank} onSelectVillage={onSelect} />
+          <ChatBox key={runId ?? "none"} runId={ready ? runId : null}
+                   pendingQuestion={pendingQuestion} onPendingConsumed={onConsumed} />
+        </aside>
+      </div>
 
-      <aside className="right">
-        <StatsPanel stats={stats} />
-        <CutoffList stats={stats} whatIf={whatIf} onToggleRank={onToggleRank} onSelectVillage={onSelect} />
-        <ChatBox key={runId ?? "none"} runId={ready ? runId : null}
-                 pendingQuestion={pendingQuestion} onPendingConsumed={onConsumed} />
-      </aside>
-    </div>
+      <StoryOverlay active={storyRunning} progress={storyProgress} caption={caption} onStop={endStory} />
+    </>
   );
 }

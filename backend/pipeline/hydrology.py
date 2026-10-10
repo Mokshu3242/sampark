@@ -91,7 +91,7 @@ def _pixel_area_m2(T, crs, lat: float) -> float:
     return abs(T.a) * m_per_deg_lon * abs(T.e) * m_per_deg_lat
 
 
-def trace(run_dir: Path, lon: float, lat: float) -> dict:
+def trace(run_dir: Path, lon: float, lat: float, snap_px: int = SNAP_PX) -> dict:
     """Walk downstream from a click. Returns a GeoJSON Feature (LineString in lon/lat)."""
     fdir_path, facc_path = build_hydro(run_dir)
     with rasterio.open(fdir_path) as ds:
@@ -107,8 +107,8 @@ def trace(run_dir: Path, lon: float, lat: float) -> dict:
         raise ValueError("That point is outside this run's area")
 
     # Snap to the strongest channel nearby, so a click near the river follows the river
-    r0, r1 = max(0, r - SNAP_PX), min(H, r + SNAP_PX + 1)
-    c0, c1 = max(0, c - SNAP_PX), min(W, c + SNAP_PX + 1)
+    r0, r1 = max(0, r - snap_px), min(H, r + snap_px + 1)
+    c0, c1 = max(0, c - snap_px), min(W, c + snap_px + 1)
     sub = facc[r0:r1, c0:c1]
     dr, dc = np.unravel_index(int(np.argmax(sub)), sub.shape)
     snapped = (r0 + dr, c0 + dc) != (r, c)

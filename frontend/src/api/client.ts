@@ -50,11 +50,11 @@ export async function getEval(id: string): Promise<any | null> {
   return r.ok ? r.json() : null;
 }
 
-export async function traceFlow(runId: string, lon: number, lat: number, bufferM = 500): Promise<any> {
+export async function traceFlow(runId: string, lon: number, lat: number, bufferM = 500, snapPx = 5): Promise<any> {
   const r = await fetch(`${API}/runs/${runId}/flowpath`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ lon, lat, buffer_m: bufferM }),
+    body: JSON.stringify({ lon, lat, buffer_m: bufferM, snap_px: snapPx }),
   });
   if (!r.ok) {
     let msg = await r.text();
