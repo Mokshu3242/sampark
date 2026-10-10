@@ -170,24 +170,35 @@ def _figure(run_dir, ours, ems, valid, ref, path, title, pts=None):
 
     rgb = np.dstack([shade] * 3) * 0.8
     rgb[~valid] *= 0.5
-    rgb[ours & ems & valid] = [0.1, 0.75, 0.2]    # agree
-    rgb[ours & ~ems & valid] = [0.9, 0.15, 0.15]  # only ours
-    rgb[~ours & ems & valid] = [0.15, 0.4, 0.95]  # only EMS
+    rgb[ours & ems & valid] = [0.1, 0.75, 0.2]    # both
+    rgb[ours & ~ems & valid] = [0.9, 0.15, 0.15]  # ours only
+    rgb[~ours & ems & valid] = [0.15, 0.4, 0.95]  # EMS only
 
-    b = rasterio.transform.array_bounds(ref["height"], ref["width"], ref["transform"])
+    # array_bounds returns (west, south, east, north)
+    west, south, east, north = rasterio.transform.array_bounds(ref["height"], ref["width"], ref["transform"])
     fig, ax = plt.subplots(figsize=(8, 10))
-    ax.imshow(rgb, extent=(b[1], b[3], b[0], b[2]))
+    ax.imshow(rgb, extent=(west, east, south, north), origin="upper", interpolation="nearest")
+
+    # Crop to the scored area (plus 1.5 km), otherwise the strips are too small to see
+    rows, cols = np.where(valid)
+    if rows.size:
+        px = abs(ref["transform"].a)
+        pad = int(1500 / px)
+        r0, r1 = max(0, rows.min() - pad), min(ref["height"], rows.max() + pad)
+        c0, c1 = max(0, cols.min() - pad), min(ref["width"], cols.max() + pad)
+        ax.set_xlim(west + c0 * px, west + c1 * px)
+        ax.set_ylim(north - r1 * px, north - r0 * px)
+
     if pts is not None and not pts.empty:
-        ax.scatter(pts.x, pts.y, s=4, c="yellow", edgecolors="black", linewidths=0.2,
-                   label="EMS damaged building")
+        ax.scatter(pts.x, pts.y, s=3, c="yellow", edgecolors="black", linewidths=0.15,
+                   label="EMS damaged building", zorder=3)
         ax.legend(loc="lower right", fontsize=7)
     ax.set_title(f"{title}\ngreen = both · red = ours only · blue = EMS only · dim = not scored",
                  fontsize=9)
-    ax.axis("off")
+    ax.set_xticks([]); ax.set_yticks([])
     fig.text(0.01, 0.01, CREDIT, fontsize=6)
-    fig.savefig(path, dpi=110, bbox_inches="tight")
+    fig.savefig(path, dpi=130, bbox_inches="tight")
     plt.close(fig)
-
 
 def compare(run_id: str) -> dict:
     run_dir = settings.runs_dir / run_id
@@ -258,6 +269,30 @@ def compare(run_id: str) -> dict:
                      ("baseline_threshold", base)):
             res[k] = scores(m, ems_mask, valid, px_ha, TOL_PX)
             res[k]["tolerance_m"] = tol_m
+
+        # Per-AOI scores: shows where the misses are
+        per_aoi = {}
+        if "aoi" in ems:
+            a_all = ems["aoi"].to_crs(epsg)
+            for aoi_name in ev_aois:
+                ag = a_all[a_all["aoi"] == aoi_name]
+                if ag.empty:
+                    continue
+                v = _burn(ag.geometry, ref, shape) & radar_ok
+                if v.sum() == 0:
+                    continue
+                s = scores(impact, ems_mask, v, px_ha, TOL_PX)
+                b = scores(base, ems_mask, v, px_ha, TOL_PX)
+                per_aoi[aoi_name] = {
+                    "precision_tolerant": s.get("precision_tolerant"),
+                    "recall_tolerant": s.get("recall_tolerant"),
+                    "f1_tolerant": s.get("f1_tolerant"),
+                    "baseline_f1_tolerant": b.get("f1_tolerant"),
+                    "scored_ha": round(float(v.sum()) * px_ha, 1),
+                    "ems_ha": round(float((ems_mask & v).sum()) * px_ha, 1),
+                    "ours_ha": round(float((impact & v).sum()) * px_ha, 1),
+                }
+        res["per_aoi"] = per_aoi
     else:
         res["pixel_scores_note"] = "EMS has no event polygons in these AOIs"
 
@@ -305,5 +340,8 @@ def compare(run_id: str) -> dict:
     figs = BACKEND.parent / "docs" / "figures"
     figs.mkdir(parents=True, exist_ok=True)
     for f in ("error_map.png", "error_map_baseline.png"):
-        shutil.copy(out_dir / f, figs / f"{run_id}_{f}")
+        try:
+            shutil.copy(out_dir / f, figs / f"{run_id}_{f}")
+        except OSError as e:   # file open in an image viewer on Windows
+            log.warning(f"Could not copy {f} to docs/figures ({e}). Close the image and rerun.")
     return res

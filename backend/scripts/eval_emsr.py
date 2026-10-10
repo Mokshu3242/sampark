@@ -35,6 +35,10 @@ else:
     print(row("Ours (flood + debris)", res.get("ours_flood_plus_debris")))
     print(row("Ours (flood only)", res.get("ours_flood_only")))
     print(row("Baseline threshold", res.get("baseline_threshold")))
+    for a, s in (res.get("per_aoi") or {}).items():
+        print(f"  {a}: tol P {s['precision_tolerant']}  R {s['recall_tolerant']}  F1 {s['f1_tolerant']}"
+              f"  | baseline F1 {s['baseline_f1_tolerant']}  | EMS {s['ems_ha']} ha, ours {s['ours_ha']} ha"
+              f"  ({s['scored_ha']} ha scored)")
 
 print("\n--- Buildings (EMS damaged points) ---")
 b = res.get("buildings")
