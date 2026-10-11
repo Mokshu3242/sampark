@@ -14,6 +14,7 @@ dist/
 # Data runs
 backend/data/runs/*
 !backend/data/runs/.gitkeep
+!backend/.env.example
 
 # OS
 .DS_Store
