@@ -15,6 +15,13 @@ const STATUS: Record<string, { text: string; tone: string }> = {
   pre_isolated: { text: "No vehicle road before the flood", tone: "muted" },
 };
 
+/** "unnamed hamlet (node/3510164368)" -> "Unnamed hamlet". Real names stay as they are. */
+export function cleanName(s: any): string {
+  const t = String(s ?? "").replace(/\s*\((node|way|relation)\/\d+\)/i, "").trim();
+  if (!t) return "Unnamed place";
+  return /^unnamed/i.test(t) ? t.charAt(0).toUpperCase() + t.slice(1) : t;
+}
+
 function km(v: any): string {
   const n = Number(v);
   return v === null || v === undefined || v === "null" || !Number.isFinite(n) ? "no route" : `${n.toFixed(1)} km`;
@@ -36,7 +43,7 @@ export default function VillageCard({ runId, village, repairPlan, onClose }: Pro
 
   const st = STATUS[village.status] ?? { text: village.status, tone: "muted" };
   const pkg = findPackage(repairPlan, village.name);
-  const name = String(village.name).startsWith("unnamed") ? "Unnamed hamlet" : village.name;
+  const name = cleanName(village.name);
   const hasPos = Number.isFinite(village._lon) && Number.isFinite(village._lat);
 
   async function ask() {
@@ -65,6 +72,7 @@ export default function VillageCard({ runId, village, repairPlan, onClose }: Pro
                 <img
                   src={chipUrl(runId, k === "before" ? "s2_before" : "s2_after", village._lon, village._lat)}
                   alt={`Sentinel-2 ${k} the flood around ${name}`}
+                  crossOrigin="anonymous"
                   onError={() => setImgOk((s) => ({ ...s, [k]: false }))}
                 />
               ) : (
@@ -92,9 +100,9 @@ export default function VillageCard({ runId, village, repairPlan, onClose }: Pro
 
       {pkg ? (
         <div className="repair-inline">
-          <b>Reopen #{pkg.rank}</b> near {pkg.near}{pkg.road ? `, ${pkg.road}` : ""}: {Math.round(pkg.length_m)} m
-          {pkg.has_bridge ? " including a bridge" : ""}. It brings back {pkg.villages_count} village
-          {pkg.villages_count === 1 ? "" : "s"}.
+          <b>Reopen #{pkg.rank}</b> near {cleanName(pkg.near)}{pkg.road ? `, ${pkg.road}` : ""}:{" "}
+          {Math.round(pkg.length_m)} m{pkg.has_bridge ? " including a bridge" : ""}. It brings back{" "}
+          {pkg.villages_count} village{pkg.villages_count === 1 ? "" : "s"}.
         </div>
       ) : village.status === "cut_off" ? (
         <p className="muted">No package in the current repair plan reconnects this village.</p>

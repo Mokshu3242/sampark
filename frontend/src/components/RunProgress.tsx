@@ -2,11 +2,11 @@ import { useEffect, useRef, useState } from "react";
 
 /** Typical seconds per stage, measured on the GitHub runner. */
 const STAGES = [
-  { label: "Starting", s: 90 },          // queue + install
+  { label: "Starting", s: 90 }, // queue + install
   { label: "Satellite data", s: 540 },
   { label: "Flood map", s: 60 },
   { label: "Damage", s: 30 },
-  { label: "Cut-off routing", s: 80 },   // includes flow and map caches
+  { label: "Cut-off routing", s: 80 }, // includes flow and map caches
 ];
 const TOTAL = STAGES.reduce((a, b) => a + b.s, 0);
 
@@ -18,14 +18,21 @@ function startMs(runId: string): number | null {
 
 type Props = {
   runId: string;
-  stageIndex: number;     // 0..4 while running, 5 when done, -1 on failure
+  stageIndex: number; // 0..4 while running, 5 when done, -1 on failure
   status?: string;
   detail?: string;
   ready: boolean;
   stopped: boolean;
 };
 
-export default function RunProgress({ runId, stageIndex, status, detail, ready, stopped }: Props) {
+export default function RunProgress({
+  runId,
+  stageIndex,
+  status,
+  detail,
+  ready,
+  stopped,
+}: Props) {
   const [now, setNow] = useState(Date.now());
   const sawRunning = useRef(false);
   if (!ready && !stopped) sawRunning.current = true;
@@ -37,7 +44,8 @@ export default function RunProgress({ runId, stageIndex, status, detail, ready, 
   }, [ready, stopped]);
 
   // An old run opened from the list: no bar, just a line
-  if (ready && !sawRunning.current) return <div className="status">Finished.</div>;
+  if (ready && !sawRunning.current)
+    return <div className="status">Finished.</div>;
 
   const t0 = startMs(runId) ?? now;
   const elapsed = Math.max(0, (now - t0) / 1000);
@@ -61,24 +69,37 @@ export default function RunProgress({ runId, stageIndex, status, detail, ready, 
   else note = "Almost done…";
 
   return (
-    <div className={`run-progress ${ready ? "is-done" : ""} ${stopped ? "is-stopped" : ""}`}>
-      <div className="rp-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100}
-           aria-valuenow={Math.round(frac * 100)}>
+    <div
+      className={`run-progress ${ready ? "is-done" : ""} ${stopped ? "is-stopped" : ""}`}
+    >
+      <div
+        className="rp-bar"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={Math.round(frac * 100)}
+      >
         <div className="rp-fill" style={{ width: `${frac * 100}%` }} />
       </div>
       <div className="rp-meta">
         <span>{note}</span>
-        {!ready && !stopped && <span className="rp-pct">{Math.round(frac * 100)}%</span>}
+        {!ready && !stopped && (
+          <span className="rp-pct">{Math.round(frac * 100)}%</span>
+        )}
       </div>
       <div className="progress">
         {STAGES.map((s, k) => (
-          <div key={s.label}
-               className={`step ${ready || k < i ? "done" : k === i && !stopped ? "active" : ""}`}>
+          <div
+            key={s.label}
+            className={`step ${ready || k < i ? "done" : k === i && !stopped ? "active" : ""}`}
+          >
             {s.label}
           </div>
         ))}
       </div>
-      {detail && !ready && <div className="status">{detail}</div>}
+      {detail && !ready && detail !== status && (
+        <div className="status">{detail}</div>
+      )}
     </div>
   );
 }

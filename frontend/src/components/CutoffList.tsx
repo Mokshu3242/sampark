@@ -1,3 +1,5 @@
+import { cleanName } from "./VillageCard";
+
 type WhatIf = {
   upTo: number;
   names: Set<string>;   // lower-case names that come back online
@@ -42,7 +44,7 @@ export default function CutoffList({ stats, whatIf, onToggleRank, onSelectVillag
               return (
                 <li key={p.rank} className={on ? "repair-on" : ""} onClick={() => onToggleRank(p.rank)}>
                   <input type="checkbox" className="repair-check" checked={on} readOnly tabIndex={-1} />
-                  <b>{p.near}</b>{p.road ? ` · ${p.road}` : ""} · {Math.round(p.length_m)} m{p.has_bridge ? " (bridge)" : ""}
+                  <b>{cleanName(p.near)}</b>{p.road ? ` · ${p.road}` : ""} · {Math.round(p.length_m)} m{p.has_bridge ? " (bridge)" : ""}
                   <br />
                   <span className="muted">
                     → {plural(p.villages_count, "village")}, {plural(p.buildings_reconnected, "building")} (total{" "}
