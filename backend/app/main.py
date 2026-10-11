@@ -37,6 +37,10 @@ def _restore():
     try:
         settings.runs_dir.mkdir(parents=True, exist_ok=True)
         RESTORE["runs"] = storage.restore_all()
+        from pipeline.hydrology import warm_cache
+        for d in settings.runs_dir.iterdir():
+            if d.is_dir():
+                warm_cache(d)
     except Exception as e:                       # never stop the server over storage
         log.exception("Restoring runs failed")
         RESTORE["error"] = str(e)[:200]

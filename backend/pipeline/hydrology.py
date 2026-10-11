@@ -2,6 +2,7 @@
 import json
 import logging
 import math
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +27,7 @@ TILE = 256             # flow_dir is read in tiles this size along the path
 MAX_TILES = 64         # tile cache cap (64 x 256 x 256 x int32 = 16 MB)
 GEOD = Geod(ellps="WGS84")
 ROAD_KIND = {"likely_cut": "road_cut", "bridge_lost": "bridge_lost", "affected": "road_affected"}
-
+DAMAGED_STATUSES = ("likely_cut", "bridge_lost", "affected")
 
 if not hasattr(np, "in1d"):
     np.in1d = lambda a, b, *args, **kw: np.isin(np.ravel(a), b, *args, **kw)
@@ -202,6 +203,56 @@ def trace(run_dir: Path, lon: float, lat: float, snap_px: int = SNAP_PX) -> dict
     })
 
 
+# ---------- Corridor helpers: small files + in-memory cache (fast on tiny CPUs) ----------
+
+def damaged_roads_path(run_dir: Path) -> Path:
+    """Only damaged road edges (a few hundred, not 120k). Built once, cached on disk."""
+    import geopandas as gpd
+
+    src, out = run_dir / "road_edges.geojson", run_dir / "road_edges_damaged.geojson"
+    if src.exists() and (not out.exists() or out.stat().st_mtime < src.stat().st_mtime):
+        where = "status IN (" + ", ".join(f"'{s}'" for s in DAMAGED_STATUSES) + ")"
+        g = gpd.read_file(src, where=where)
+        cols = [c for c in ("status", "highway", "name", "is_bridge", "geometry") if c in g]
+        g[cols].to_file(out, driver="GeoJSON")
+        log.info(f"Wrote {out.name}: {len(g)} damaged edges")
+    return out
+
+
+@lru_cache(maxsize=16)
+def _load(path: str, mtime: float):
+    import geopandas as gpd
+    g = gpd.read_file(path)
+    if g.crs is not None and g.crs.to_epsg() != 4326:
+        g = g.to_crs(4326)
+    return g
+
+
+def _cached(p: Path):
+    """Read a layer once per run and keep it in memory. Callers must not modify the result."""
+    return _load(str(p), p.stat().st_mtime)
+
+
+def _near(g, bbox):
+    """Rows whose bounds touch bbox (lon/lat)."""
+    if g.empty:
+        return g
+    minx, miny, maxx, maxy = bbox
+    return g.cx[minx:maxx, miny:maxy]
+
+
+def warm_cache(run_dir: Path) -> None:
+    """Load the corridor layers for one run ahead of time (call after restore)."""
+    try:
+        if (run_dir / "road_edges.geojson").exists():
+            _cached(damaged_roads_path(run_dir))
+        for name in ("debris_polygons.geojson", "flood_polygons.geojson", "cutoff.geojson"):
+            if (run_dir / name).exists():
+                _cached(run_dir / name)
+    except Exception as e:
+        log.warning(f"Cache warm-up failed for {run_dir.name}: {e}")
+
+
 def villages_along(feature: dict, run_dir: Path, buffer_m: float = 500.0) -> list[dict]:
     """Settlements within buffer_m of the path, in downstream order."""
     import geopandas as gpd
@@ -210,10 +261,9 @@ def villages_along(feature: dict, run_dir: Path, buffer_m: float = 500.0) -> lis
     p = run_dir / "cutoff.geojson"
     if not p.exists():
         return []
-    gdf = gpd.read_file(p)
+    gdf = _cached(p)
     if gdf.empty:
         return []
-    gdf = gdf.to_crs(4326)
 
     line = gpd.GeoSeries([shape(feature["geometry"])], crs=4326)
     utm = line.estimate_utm_crs()                 # true metres at this latitude
@@ -256,9 +306,7 @@ def corridor_events(feature: dict, run_dir: Path, buffer_m: float = 300.0,
         cum.append(cum[-1] + math.hypot(x1 - x0, y1 - y0))
     zone = lm.buffer(buffer_m)
     vzone = lm.buffer(village_buffer_m)
-    # Only read features near the path (bbox filter at read time keeps memory low)
-    zone_ll = gpd.GeoSeries([vzone], crs=utm).to_crs(4326).total_bounds
-    bbox = tuple(float(v) for v in zone_ll)
+    bbox = tuple(float(v) for v in gpd.GeoSeries([vzone], crs=utm).to_crs(4326).total_bounds)
 
     events: list[dict] = []
     geoms = []
@@ -267,19 +315,11 @@ def corridor_events(feature: dict, run_dir: Path, buffer_m: float = 300.0,
         events.append(props)
         geoms.append(geom.representative_point())
 
-    def read_near(p: Path, **kw):
-        try:
-            return gpd.read_file(p, bbox=bbox, **kw)
-        except Exception:                          # file CRS differs or driver lacks bbox support
-            return gpd.read_file(p, **kw)
-
-    # Roads: cut, bridge lost, affected
-    p = run_dir / "road_edges.geojson"
-    if p.exists():
-        r = read_near(p, where="status IN ('likely_cut', 'bridge_lost', 'affected')")
-        r = r[r["status"].isin(list(ROAD_KIND))] if not r.empty else r
+    # Roads: cut, bridge lost, affected (small pre-filtered file)
+    if (run_dir / "road_edges.geojson").exists():
+        r = _near(_cached(damaged_roads_path(run_dir)), bbox)
         if not r.empty:
-            r = r.to_crs(utm)
+            r = r[r["status"].isin(list(ROAD_KIND))].to_crs(utm)
             r = r[r.intersects(zone)]
             for _, row in r.iterrows():
                 add(row.geometry, kind=ROAD_KIND[row["status"]],
@@ -290,7 +330,7 @@ def corridor_events(feature: dict, run_dir: Path, buffer_m: float = 300.0,
         p = run_dir / fname
         if not p.exists():
             continue
-        g = read_near(p)
+        g = _near(_cached(p), bbox)
         if g.empty:
             continue
         g = g.to_crs(utm)
@@ -309,7 +349,7 @@ def corridor_events(feature: dict, run_dir: Path, buffer_m: float = 300.0,
             dmg[s.get("name")] = s
     p = run_dir / "cutoff.geojson"
     if p.exists():
-        v = read_near(p)
+        v = _near(_cached(p), bbox)
         if not v.empty:
             v = v.to_crs(utm)
             v = v[v.intersects(vzone)]
