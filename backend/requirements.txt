@@ -21,3 +21,5 @@ openai==1.51.0
 matplotlib
 
 jinja2
+pymongo
+boto3

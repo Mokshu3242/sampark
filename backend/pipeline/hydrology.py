@@ -219,7 +219,7 @@ def corridor_events(feature: dict, run_dir: Path, buffer_m: float = 300.0,
     # Roads: cut, bridge lost, affected
     p = run_dir / "road_edges.geojson"
     if p.exists():
-        r = gpd.read_file(p)
+        r = gpd.read_file(p, where="status IN ('likely_cut', 'bridge_lost', 'affected')")
         r = r[r["status"].isin(list(ROAD_KIND))]
         if not r.empty:
             r = r.to_crs(utm)

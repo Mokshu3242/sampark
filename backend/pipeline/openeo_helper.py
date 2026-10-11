@@ -1,8 +1,10 @@
 import logging
 from datetime import date, timedelta
 from pathlib import Path
-
+import os
+import sys
 import openeo
+from app.core.config import settings
 
 log = logging.getLogger("flood-watch.openeo")
 
@@ -12,10 +14,18 @@ S1_COEFFICIENT = "sigma0-ellipsoid"   # terrain-flattened, best for mountains
 DEM_BAND = "DEM"                     # confirm with probe_cdse.py
 S2_CLOUD_CLASSES = (3, 8, 9, 10)     # SCL: shadow, cloud medium, cloud high, cirrus
 
-
 def connect() -> openeo.Connection:
-    """Reuses the saved CDSE token. First run prints a login link."""
-    return openeo.connect(BACKEND_URL).authenticate_oidc()
+    """Server: CDSE client credentials. Your PC without them: the saved token, as before."""
+    conn = openeo.connect(BACKEND_URL)
+    cid = settings.cdse_client_id or os.getenv("CDSE_CLIENT_ID", "")
+    secret = settings.cdse_client_secret or os.getenv("CDSE_CLIENT_SECRET", "")
+    if cid and secret:
+        log.info("openEO: logging in with client credentials")
+        return conn.authenticate_oidc_client_credentials(client_id=cid, client_secret=secret)
+    if os.getenv("RENDER") or not sys.stdin.isatty():
+        # On a server nobody can click a login link: fail fast instead of hanging
+        return conn.authenticate_oidc(max_poll_time=20)
+    return conn.authenticate_oidc()
 
 
 def utm_epsg(bbox: list[float]) -> int:

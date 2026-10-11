@@ -44,4 +44,10 @@ def run_pipeline(run_id: str, bbox: list[float], flood_date: date, window_days: 
         log.warning(f"Flow cache not built: {e}")
 
     registry.set_status(run_id, "done", "Pipeline complete")
+
+    try:
+        from app.core import storage
+        storage.upload_run(run_id)              # free hosts wipe the disk; keep a copy
+    except Exception as e:                      # never fail a finished run over storage
+        log.warning(f"Could not store run {run_id} in Mongo: {e}")
     return summary

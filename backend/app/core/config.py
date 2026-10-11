@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
 
+    mongo_uri: str = ""
+    mongo_username: str = ""
+    mongo_password: str = ""
+
+    b2_endpoint: str = ""
+    b2_key_id: str = ""
+    b2_app_key: str = ""
+    b2_bucket: str = ""
+
     runs_dir: Path = BACKEND / "data" / "runs"
 
     def available_llms(self) -> list[str]:
