@@ -1,15 +1,15 @@
 import logging
 import threading
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api import routes_images, routes_runs
 from app.core import storage
+from app.core.auth import require_key
 from app.core.config import settings
 from app.core.logging import setup_logging
 from app.core.run_registry import RunRegistry
-from app.api import routes_runs
-from app.api import routes_images
 
 setup_logging()
 log = logging.getLogger("sampark")
@@ -38,7 +38,7 @@ def _restore():
         settings.runs_dir.mkdir(parents=True, exist_ok=True)
         RESTORE["runs"] = storage.restore_all()
     except Exception as e:                       # never stop the server over storage
-        log.exception("Restoring runs from Mongo failed")
+        log.exception("Restoring runs failed")
         RESTORE["error"] = str(e)[:200]
     finally:
         RESTORE["done"] = True
@@ -52,12 +52,18 @@ def startup():
 
 @app.get("/health")
 def health():
-    return {"ok": True, "runs_restored": RESTORE["done"], "restored": RESTORE["runs"], "error": RESTORE["error"]}
+    return {"ok": True, "runs_restored": RESTORE["done"], "restored": RESTORE["runs"],
+            "error": RESTORE["error"], "locked": bool(settings.access_key)}
 
 
 @app.get("/version")
 def version():
     return {"version": app.version, "env": settings.env}
+
+
+@app.get("/auth/check", dependencies=[Depends(require_key)])
+def auth_check():
+    return {"ok": True, "locked": bool(settings.access_key)}
 
 
 app.include_router(routes_runs.router)

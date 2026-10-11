@@ -31,7 +31,7 @@ def _as_text(content) -> str:
 
 
 def _failed_generation(resp) -> str:
-    """Groq JSON mode puts the model's real text in error.failed_generation."""
+    """Some providers put the model's real text in error.failed_generation."""
     try:
         err = resp.json().get("error") or {}
         return str(err.get("failed_generation") or "")
@@ -68,9 +68,8 @@ class OpenAIStyle(Provider):
 
             if "gpt-oss" in self.model:
                 payload["reasoning_effort"] = "low"
-                # JSON mode only when the prompt asks for JSON (Groq requires the word "json")
-                if any("json" in (m.get("content") or "").lower() for m in messages):
-                    payload["response_format"] = {"type": "json_object"}
+                # No strict JSON mode: it rejects whole replies over small slips.
+                # agent._parse/_normalize pull the JSON out of plain text instead.
 
             try:
                 resp = requests.post(self.url, headers={"Authorization": f"Bearer {self.key}"},
@@ -79,7 +78,7 @@ class OpenAIStyle(Provider):
                 raise LLMError(f"{self.name} network error: {e}") from e
 
             if resp.status_code != 200:
-                # JSON check failed, but the text is often fine. agent._parse() can rescue it.
+                # Safety net: if a provider still runs a JSON check, keep the model's text
                 if resp.status_code == 400 and "json_validate_failed" in resp.text:
                     gen = _failed_generation(resp)
                     if gen.strip():

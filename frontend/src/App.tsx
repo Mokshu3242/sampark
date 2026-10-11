@@ -12,6 +12,7 @@ import ComparePanel from "./components/ComparePanel";
 import StoryPanel from "./components/StoryPanel";
 import StoryOverlay from "./components/StoryOverlay";
 import { buildStory, type StoryAction, type StoryStep } from "./story/story";
+import UnlockPanel from "./components/UnlockPanel";
 import {
   primeVoices,
   speak,
@@ -495,7 +496,7 @@ export default function App() {
             Educational prototype, not an operational tool. Results are
             satellite estimates and are not field-verified.
           </div>
-
+          <UnlockPanel />
           <RunForm
             onSelect={(id) => {
               setRunId(id);

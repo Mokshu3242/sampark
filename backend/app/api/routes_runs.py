@@ -5,7 +5,8 @@ from datetime import date
 from io import BytesIO
 
 import geopandas as gpd
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from app.core.auth import require_key
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 
@@ -25,6 +26,8 @@ from pipeline.run_all import run_pipeline
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 registry = RunRegistry(settings.runs_dir)
+
+LOCKED = [Depends(require_key)]
 
 LAYER_FILES = {
     "flood": "flood_polygons.geojson",
@@ -82,7 +85,7 @@ def _roads_web(run_dir):
 
 # ---------- Create, list, status ----------
 
-@router.post("")
+@router.post("", dependencies=LOCKED)
 def create_run(req: RunRequest, bg: BackgroundTasks):
     run_id = registry.new_run(req.model_dump(mode="json"))
     bg.add_task(run_pipeline, run_id, req.bbox, req.flood_date, req.window_days)
@@ -109,7 +112,7 @@ def get_run(run_id: str):
 
 # ---------- Stop & delete ----------
 
-@router.post("/{run_id}/cancel")
+@router.post("/{run_id}/cancel", dependencies=LOCKED)
 def cancel_run(run_id: str):
     d = _run_dir(run_id)
     if run_id not in cancel.ACTIVE:
@@ -121,7 +124,7 @@ def cancel_run(run_id: str):
     return {"ok": True, "status": "cancelling"}
 
 
-@router.delete("/{run_id}")
+@router.delete("/{run_id}", dependencies=LOCKED)
 def delete_run(run_id: str):
     if run_id in storage.PINNED:
         raise HTTPException(403, "Demo runs cannot be deleted")
@@ -136,26 +139,26 @@ def delete_run(run_id: str):
 
 # ---------- Per-phase debug endpoints ----------
 
-@router.post("/{run_id}/fetch")
+@router.post("/{run_id}/fetch", dependencies=LOCKED)
 def fetch_run(run_id: str, bg: BackgroundTasks):
     req = _load_request(run_id)
     bg.add_task(fetch_all, run_id, req["bbox"], date.fromisoformat(req["flood_date"]), req.get("window_days", 30))
     return {"run_id": run_id, "status": "fetch_started"}
 
 
-@router.post("/{run_id}/map")
+@router.post("/{run_id}/map", dependencies=LOCKED)
 def map_run(run_id: str, bg: BackgroundTasks):
     bg.add_task(map_flood, run_id, _load_request(run_id)["bbox"])
     return {"run_id": run_id, "status": "mapping_started"}
 
 
-@router.post("/{run_id}/damage")
+@router.post("/{run_id}/damage", dependencies=LOCKED)
 def damage_run(run_id: str, bg: BackgroundTasks):
     bg.add_task(map_damage, run_id, _load_request(run_id)["bbox"])
     return {"run_id": run_id, "status": "damage_started"}
 
 
-@router.post("/{run_id}/cutoff")
+@router.post("/{run_id}/cutoff", dependencies=LOCKED)
 def cutoff_run(run_id: str, bg: BackgroundTasks):
     bg.add_task(map_cutoff, run_id, _load_request(run_id)["bbox"])
     return {"run_id": run_id, "status": "cutoff_started"}
@@ -189,7 +192,7 @@ def get_stats(run_id: str):
 
 # ---------- Chat & report ----------
 
-@router.post("/{run_id}/chat")
+@router.post("/{run_id}/chat", dependencies=LOCKED)
 def chat(run_id: str, body: ChatRequest):
     run_dir = _run_dir(run_id)
     if not body.question.strip():

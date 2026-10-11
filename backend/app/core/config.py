@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     # LLM order: tried left to right, providers without keys are skipped
     llm_order: str = "groq,cloudflare"
 
+    access_key: str = ""     # ACCESS_KEY. Empty = no lock (local dev)
+
     groq_api_key: str = ""
     groq_model: str = "openai/gpt-oss-120b"
 
