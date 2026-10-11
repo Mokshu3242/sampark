@@ -1,8 +1,12 @@
+import json
 from pathlib import Path
+
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 BACKEND = Path(__file__).resolve().parents[2]   # backend/
 REPO = BACKEND.parent                            # repo root
+DEFAULT_ORIGIN = "http://localhost:5173"
 
 
 class Settings(BaseSettings):
@@ -12,7 +16,8 @@ class Settings(BaseSettings):
     )
 
     env: str = "dev"
-    cors_origins: list[str] = ["http://localhost:5173"]
+    # Read as plain text so a bad value can never crash startup. Use settings.cors_origins.
+    cors_origins_raw: str = Field(DEFAULT_ORIGIN, validation_alias="CORS_ORIGINS")
 
     cdse_client_id: str = ""
     cdse_client_secret: str = ""
@@ -40,6 +45,20 @@ class Settings(BaseSettings):
     b2_bucket: str = ""
 
     runs_dir: Path = BACKEND / "data" / "runs"
+
+    @property
+    def cors_origins(self) -> list[str]:
+        """Accepts JSON ["a","b"], a comma list a,b, or empty (falls back to localhost)."""
+        raw = (self.cors_origins_raw or "").strip()
+        if raw.startswith("["):
+            try:
+                items = [str(x) for x in json.loads(raw)]
+            except ValueError:
+                items = raw.strip("[]").split(",")
+        else:
+            items = raw.split(",")
+        clean = [x.strip().strip("'\"").rstrip("/") for x in items]
+        return [x for x in clean if x] or [DEFAULT_ORIGIN]
 
     def available_llms(self) -> list[str]:
         has_key = {
