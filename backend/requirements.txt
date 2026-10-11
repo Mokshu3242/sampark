@@ -20,3 +20,4 @@ matplotlib
 jinja2
 pymongo
 boto3
+copi
