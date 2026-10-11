@@ -1,3 +1,6 @@
 .venv
+.env
+data/
+demo_runs.zip
 __pycache__
-data/runs/*
+*.pyc
