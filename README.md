@@ -152,8 +152,9 @@ Locally, runs execute on your own machine. A full run takes about 15 minutes, mo
 
 ```bash
 cd backend
-python -m scripts.eval_emsr          # needs the EMSR927 GRA product files in data/ems
-python -m scripts.diagnose_gorge     # per-area diagnostic of the gorge misses
+python -m scripts.eval_emsr describe                    # list the EMS layers found
+python -m scripts.eval_emsr 20261008T063513-021f3e      # score one run
+python -m scripts.diagnose_gorge                        # per-area diagnostic of the gorge misses
 ```
 
 ## Project layout
