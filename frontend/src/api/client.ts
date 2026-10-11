@@ -10,6 +10,7 @@ export type RunInfo = {
   ready?: boolean;
   request?: { name: string; bbox: number[]; flood_date: string };
   quality?: any;
+  flood_date?: string;
 };
 
 async function j(r: Response) {
@@ -82,4 +83,16 @@ export function villageNamesFrom(field: any): string[] {
   if (!field) return [];
   if (Array.isArray(field)) return field.map((s) => String(s).trim()).filter(Boolean);
   return String(field).split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+export async function cancelRun(runId: string) {
+  const r = await fetch(`${API}/runs/${runId}/cancel`, { method: "POST" });
+  if (!r.ok) throw new Error((await r.json()).detail || "Stop failed");
+  return r.json();
+}
+
+export async function deleteRun(runId: string) {
+  const r = await fetch(`${API}/runs/${runId}`, { method: "DELETE" });
+  if (!r.ok) throw new Error((await r.json()).detail || "Delete failed");
+  return r.json();
 }

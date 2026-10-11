@@ -3,14 +3,31 @@ from datetime import date
 
 from app.core.config import settings
 from app.core.run_registry import RunRegistry
-from pipeline import fetch, map_cutoff, map_damage, map_flood
+from pipeline import cancel, fetch, map_cutoff, map_damage, map_flood
 
 log = logging.getLogger("flood-watch.run_all")
 
 
+def _stopped(registry: RunRegistry, run_id: str, where: str) -> dict:
+    log.info(f"[{run_id}] stopped by user before {where}")
+    registry.set_status(run_id, "cancelled", f"Stopped by user before {where}")
+    return {"cancelled_at": where}
+
+
 def run_pipeline(run_id: str, bbox: list[float], flood_date: date, window_days: int = 30) -> dict:
-    """Runs Phase 1 to 4 in order. Each phase writes its own files to the run folder."""
+    """Entry point. Marks the run as live in this process, so the API knows it's really running."""
+    cancel.ACTIVE.add(run_id)
+    try:
+        return _run_pipeline(run_id, bbox, flood_date, window_days)
+    finally:
+        cancel.ACTIVE.discard(run_id)
+
+
+def _run_pipeline(run_id: str, bbox: list[float], flood_date: date, window_days: int = 30) -> dict:
+    """Runs Phase 1 to 4 in order. Each phase writes its own files to the run folder.
+    Checks for a Stop request between stages."""
     registry = RunRegistry(settings.runs_dir)
+    run_dir = settings.runs_dir / run_id
 
     if isinstance(flood_date, str):
         flood_date = date.fromisoformat(flood_date)
@@ -28,20 +45,33 @@ def run_pipeline(run_id: str, bbox: list[float], flood_date: date, window_days: 
 
     summary = {}
     for stage, label, fn in stages:
+        if cancel.requested(run_dir):
+            return _stopped(registry, run_id, stage)
+
         registry.set_status(run_id, stage, label)
         log.info(f"[{run_id}] {stage}: {label}")
         try:
             summary[stage] = fn()
+        except cancel.Cancelled:
+            return _stopped(registry, run_id, stage)
         except Exception as e:
+            if cancel.requested(run_dir):       # a stop during a stage can surface as an error
+                return _stopped(registry, run_id, stage)
             log.exception(f"[{run_id}] {stage} failed")
             registry.set_status(run_id, "failed", f"{stage}: {str(e)[:200]}")
             return {"failed_at": stage, "error": str(e)[:200]}
 
+    if cancel.requested(run_dir):
+        return _stopped(registry, run_id, "flow cache")
+
     try:
         from pipeline import hydrology
-        hydrology.build_hydro(settings.runs_dir / run_id)
+        hydrology.build_hydro(run_dir)
     except Exception as e:                      # bonus feature: never fail the run for it
         log.warning(f"Flow cache not built: {e}")
+
+    if cancel.requested(run_dir):
+        return _stopped(registry, run_id, "saving")
 
     registry.set_status(run_id, "done", "Pipeline complete")
 
@@ -49,5 +79,5 @@ def run_pipeline(run_id: str, bbox: list[float], flood_date: date, window_days: 
         from app.core import storage
         storage.upload_run(run_id)              # free hosts wipe the disk; keep a copy
     except Exception as e:                      # never fail a finished run over storage
-        log.warning(f"Could not store run {run_id} in Mongo: {e}")
+        log.warning(f"Could not store run {run_id}: {e}")
     return summary

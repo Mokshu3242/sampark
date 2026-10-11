@@ -3,10 +3,10 @@ import logging
 import re
 from pathlib import Path
 
+from copilot.translate import to_english, to_nepali
 from app.core.llm import LLM, LLMError, get_llm
 from copilot.prompts import SYSTEM_EN
 from copilot.tools import TOOL_NAMES, ToolBox, ToolError
-from copilot.translate import to_nepali
 from copilot.verify import check_answer
 
 log = logging.getLogger("flood-watch.agent")
@@ -52,8 +52,15 @@ def ask(question: str, run_dir: Path, language: str = "auto", llm: LLM | None = 
         history: list[dict] | None = None) -> dict:
     """Answer a question. language: 'en', 'ne', or 'auto' (Nepali if the question is in Devanagari)."""
     llm = llm or get_llm()
-    want_ne = language == "ne" or (language == "auto" and DEVANAGARI_TEXT.search(question))
-    result = _answer_en(question, run_dir, llm, history or [])
+    is_ne_text = bool(DEVANAGARI_TEXT.search(question))
+    want_ne = language == "ne" or (language == "auto" and is_ne_text)
+
+    q_en = to_english(question, llm) if is_ne_text else question
+    if is_ne_text and q_en == question:
+        q_en = question + "\n(The question is in Nepali. Understand it, but reply in English JSON.)"
+
+    result = _answer_en(q_en, run_dir, llm, history or [])
+    result["question_en"] = q_en
 
     if want_ne and result.get("verified"):
         ne = to_nepali(result["answer"], llm)
@@ -82,6 +89,7 @@ def _answer_en(question: str, run_dir: Path, llm: LLM, history: list[dict]) -> d
         try:
             obj = _parse(raw)
         except Exception:
+            log.info(f"Not JSON: {raw[:200]}")  
             messages += [{"role": "assistant", "content": raw},
                          {"role": "user", "content": "Reply with one JSON object only."}]
             continue
@@ -144,5 +152,6 @@ def _answer_en(question: str, run_dir: Path, llm: LLM, history: list[dict]) -> d
         messages += [{"role": "assistant", "content": raw},
                      {"role": "user", "content": 'Use {"tool": ...} or {"answer": ...} only. JSON only.'}]
 
+    log.info(f"No verified answer. Trace: {trace}")
     return _result("I couldn't reach a verified answer. Please try a simpler question.",
                    tool_outputs, trace, llm.last_provider, verified=False)

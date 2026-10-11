@@ -1,4 +1,5 @@
 import json
+import shutil
 import zipfile
 from datetime import date
 from io import BytesIO
@@ -8,17 +9,19 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 
+from app.core import storage
 from app.core.config import settings
 from app.core.run_registry import RunRegistry
 from app.schemas.run import RunRequest
 from copilot.agent import ask as copilot_ask
 from copilot.report import generate as generate_report
+from pipeline import cancel
 from pipeline.fetch import fetch_all
+from pipeline.hydrology import corridor_events, trace as trace_flow, villages_along
 from pipeline.map_cutoff import map_cutoff
 from pipeline.map_damage import map_damage
 from pipeline.map_flood import map_flood
 from pipeline.run_all import run_pipeline
-from pipeline.hydrology import corridor_events, trace as trace_flow, villages_along
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 registry = RunRegistry(settings.runs_dir)
@@ -32,6 +35,7 @@ LAYER_FILES = {
 }
 MAJOR_ROADS = {"motorway", "trunk", "primary", "secondary", "tertiary",
                "motorway_link", "trunk_link", "primary_link", "secondary_link"}
+FINISHED = {"done", "failed", "cancelled"}
 
 
 class ChatRequest(BaseModel):
@@ -39,11 +43,13 @@ class ChatRequest(BaseModel):
     language: str = "auto"
     history: list[dict] = []
 
+
 class FlowRequest(BaseModel):
     lon: float
     lat: float
     buffer_m: float = 500.0
     snap_px: int = 5
+
 
 def _run_dir(run_id: str):
     d = settings.runs_dir / run_id
@@ -54,6 +60,13 @@ def _run_dir(run_id: str):
 
 def _load_request(run_id: str) -> dict:
     return json.loads((_run_dir(run_id) / "request.json").read_text(encoding="utf-8"))
+
+
+def _status_of(run_id: str) -> str | None:
+    try:
+        return (registry.get_status(run_id) or {}).get("status")
+    except Exception:
+        return None
 
 
 def _roads_web(run_dir):
@@ -92,6 +105,33 @@ def get_run(run_id: str):
         "request": _load_request(run_id),
         "quality": json.loads(q.read_text(encoding="utf-8")) if q.exists() else None,
     }
+
+
+# ---------- Stop & delete ----------
+
+@router.post("/{run_id}/cancel")
+def cancel_run(run_id: str):
+    d = _run_dir(run_id)
+    if run_id not in cancel.ACTIVE:
+        # Not running here (finished, or stuck after a restart). Mark it so the UI stops waiting.
+        if _status_of(run_id) not in FINISHED:
+            registry.set_status(run_id, "cancelled", "Stopped (was not running)")
+        return {"ok": True, "status": "cancelled"}
+    cancel.request(d)
+    return {"ok": True, "status": "cancelling"}
+
+
+@router.delete("/{run_id}")
+def delete_run(run_id: str):
+    if run_id in storage.PINNED:
+        raise HTTPException(403, "Demo runs cannot be deleted")
+    if run_id in cancel.ACTIVE:
+        raise HTTPException(409, "Run is still going. Stop it first.")
+    d = settings.runs_dir / run_id
+    if d.exists():
+        shutil.rmtree(d, ignore_errors=True)
+    removed = storage.delete_run(run_id)
+    return {"ok": True, "local": not d.exists(), **removed}
 
 
 # ---------- Per-phase debug endpoints ----------
@@ -140,7 +180,8 @@ def get_layer(run_id: str, name: str):
 def get_stats(run_id: str):
     run_dir = _run_dir(run_id)
     out = {}
-    for key, fname in [("flood", "flood_stats.json"), ("damage", "damage_stats.json"), ("cutoff", "cutoff_stats.json"), ("eval", "eval.json")]:
+    for key, fname in [("flood", "flood_stats.json"), ("damage", "damage_stats.json"),
+                       ("cutoff", "cutoff_stats.json"), ("eval", "eval.json")]:
         p = run_dir / fname
         out[key] = json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
     return out
@@ -190,12 +231,14 @@ def export_run(run_id: str):
     return Response(buf.getvalue(), media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="{run_id}.zip"'})
 
+
 @router.get("/{run_id}/eval")
 def get_eval(run_id: str):
     p = settings.runs_dir / run_id / "eval.json"
     if not p.exists():
         raise HTTPException(404, "No validation for this run. Run scripts.eval_emsr first.")
     return json.loads(p.read_text(encoding="utf-8"))
+
 
 @router.post("/{run_id}/flowpath")
 def flowpath(run_id: str, body: FlowRequest):

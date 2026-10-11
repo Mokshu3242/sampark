@@ -348,3 +348,7 @@ header .muted { margin: 4px 0 0; }
   border: 1px solid rgba(255,255,255,0.3); border-radius: 8px; font: 500 13px "Inter", system-ui, sans-serif;
 }
 .story-stop:hover { background: rgba(0,0,0,0.75); }
+button.danger { background: #b42318; }
+button.danger:hover:not(:disabled) { background: #912018; }
+.btn-row { display: flex; gap: 8px; }
+.btn-row button { flex: 1; }

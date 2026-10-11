@@ -1,21 +1,47 @@
 import { useEffect, useState } from "react";
-import { createRun, listRuns, PRESETS, type RunInfo } from "../api/client";
+import { createRun, deleteRun, listRuns, PRESETS, type RunInfo } from "../api/client";
 
-type Props = { onSelect: (runId: string) => void; disabled?: boolean };
+type Props = {
+  onSelect: (runId: string) => void;
+  onDeleted?: (runId: string) => void;
+  disabled?: boolean;
+};
 
-export default function RunForm({ onSelect, disabled }: Props) {
+const floodDateOf = (r: RunInfo): string | undefined =>
+  (r as any).flood_date ?? (r as any).request?.flood_date;
+
+/** "Flood 26 Aug 2026 · made 10 Oct 22:42" (made time in local time, read from the run ID). */
+function runLabel(r: RunInfo) {
+  const m = r.run_id.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})/);
+  const made = m
+    ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5])).toLocaleString("en-GB", {
+        day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+      })
+    : r.run_id;
+  const fd = floodDateOf(r);
+  const flood = fd
+    ? new Date(fd + "T00:00:00Z").toLocaleDateString("en-GB", {
+        day: "numeric", month: "short", year: "numeric", timeZone: "UTC",
+      })
+    : "?";
+  const st = (r as any).status;
+  const tag = r.ready ? "" : st === "failed" ? " · failed" : st === "cancelled" ? " · stopped" : " · running";
+  return `Flood ${flood} · made ${made}${tag}`;
+}
+
+export default function RunForm({ onSelect, onDeleted, disabled }: Props) {
   const [bbox, setBbox] = useState<number[]>(PRESETS[0].bbox);
   const [date, setDate] = useState(PRESETS[0].date);
   const [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [runs, setRuns] = useState<RunInfo[]>([]);
   const [pick, setPick] = useState("");
 
   useEffect(() => {
     listRuns().then((r) => {
-      const ready = r.filter((x) => x.ready);
-      setRuns(ready);
-      if (ready.length) setPick(ready[0].run_id);
+      setRuns(r);
+      setPick((cur) => (r.some((x) => x.run_id === cur) ? cur : r[0]?.run_id || ""));
     }).catch(() => {});
   }, [disabled]);
 
@@ -32,6 +58,23 @@ export default function RunForm({ onSelect, disabled }: Props) {
     }
   }
 
+  async function remove() {
+    if (!pick || !confirm("Delete this run everywhere? This cannot be undone.")) return;
+    setDeleting(true);
+    setError(null);
+    try {
+      await deleteRun(pick);
+      const left = runs.filter((r) => r.run_id !== pick);
+      setRuns(left);
+      onDeleted?.(pick);
+      setPick(left[0]?.run_id || "");
+    } catch (e: any) {
+      setError(String(e.message || e));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <>
       {runs.length > 0 && (
@@ -39,10 +82,15 @@ export default function RunForm({ onSelect, disabled }: Props) {
           <h2>Open existing run</h2>
           <select value={pick} onChange={(e) => setPick(e.target.value)} disabled={disabled}>
             {runs.map((r) => (
-              <option key={r.run_id} value={r.run_id}>{r.run_id} · {r.flood_date}</option>
+              <option key={r.run_id} value={r.run_id} title={r.run_id}>{runLabel(r)}</option>
             ))}
           </select>
-          <button onClick={() => pick && onSelect(pick)} disabled={disabled || !pick}>Open</button>
+          <div className="btn-row">
+            <button onClick={() => pick && onSelect(pick)} disabled={disabled || !pick}>Open</button>
+            <button className="danger" onClick={remove} disabled={disabled || deleting || !pick}>
+              {deleting ? "Deleting…" : "Delete"}
+            </button>
+          </div>
         </div>
       )}
 

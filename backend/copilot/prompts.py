@@ -62,3 +62,10 @@ Strict rules:
 - Translate the meaning, not word by word. Do not add words that are not in the English.
 - Keep place names in English letters.
 - Output only the Nepali text."""
+
+TO_ENGLISH_SYSTEM = """Translate the user's question into plain English.
+It is about a flood map: villages, roads, bridges, buildings, debris, repair.
+Terms: सम्पर्कविहीन = cut off, गाउँ = village, पुल = bridge, सडक = road,
+बाढी = flood, मलबा = debris, भवन = building, अस्पताल = hospital.
+Keep place names as they are. Keep any digits as they are.
+Output only the English question, nothing else."""

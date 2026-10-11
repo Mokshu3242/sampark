@@ -51,3 +51,25 @@ def to_nepali(english: str, llm: LLM | None = None, devanagari_digits: bool = Tr
 
     return {"answer": english, "language": "en", "provider": llm.last_provider,
             "note": "Nepali translation could not be verified, showing English."}
+
+from copilot.prompts import TO_ENGLISH_SYSTEM
+
+
+def to_english(question: str, llm: LLM | None = None) -> str:
+    """Nepali question -> English question. Falls back to the original text."""
+    llm = llm or get_llm()
+    try:
+        raw = llm.chat([{"role": "system", "content": TO_ENGLISH_SYSTEM},
+                        {"role": "user", "content": question}], temperature=0.0, max_tokens=200)
+    except LLMError as e:
+        log.warning(f"Question translation failed: {e}")
+        return question
+    text = raw.strip().strip('"').strip()
+    if not text or DEVANAGARI_TEXT.search(text):
+        log.warning(f"Question translation looks wrong: {text[:100]}")
+        return question
+    log.info(f"Question in English: {text}")
+    return text
+
+
+DEVANAGARI_TEXT = re.compile(r"[\u0900-\u097F]")

@@ -9,7 +9,8 @@ from app.core.config import settings
 log = logging.getLogger("flood-watch.llm")
 
 # Errors where retrying the same provider won't help
-PERMANENT_HINTS = ("daily", "quota", "404", "403", "not_found", "suspended", "empty answer", "tool_use_failed")
+PERMANENT_HINTS = ("daily", "quota", "404", "403", "not_found", "suspended", "empty answer",
+                   "tool_use_failed", "json_validate_failed")
 
 
 class LLMError(RuntimeError):
@@ -27,6 +28,15 @@ def _as_text(content) -> str:
     if isinstance(content, (dict, list)):
         return json.dumps(content, ensure_ascii=False)
     return str(content)
+
+
+def _failed_generation(resp) -> str:
+    """Groq JSON mode puts the model's real text in error.failed_generation."""
+    try:
+        err = resp.json().get("error") or {}
+        return str(err.get("failed_generation") or "")
+    except (ValueError, AttributeError):
+        return ""
 
 
 class Provider:
@@ -67,8 +77,14 @@ class OpenAIStyle(Provider):
                                      json=payload, timeout=90)
             except requests.RequestException as e:
                 raise LLMError(f"{self.name} network error: {e}") from e
-            
+
             if resp.status_code != 200:
+                # JSON check failed, but the text is often fine. agent._parse() can rescue it.
+                if resp.status_code == 400 and "json_validate_failed" in resp.text:
+                    gen = _failed_generation(resp)
+                    if gen.strip():
+                        log.info(f"{self.name} JSON check failed, using raw text: {gen[:300]}")
+                        return gen
                 raise LLMError(f"{self.name} HTTP {resp.status_code}: {resp.text[:300]}")
 
             try:

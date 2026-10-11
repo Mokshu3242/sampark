@@ -14,7 +14,7 @@ import StoryOverlay from "./components/StoryOverlay";
 import { buildStory, type StoryAction, type StoryStep } from "./story/story";
 import { primeVoices, speak, startRiver, stopRiver, stopSpeaking } from "./story/speak";
 import {
-  exportUrl, getRun, getStats, imageUrl, layerUrl, reportUrl, traceFlow, villageNamesFrom, type RunInfo,
+  cancelRun, exportUrl, getRun, getStats, imageUrl, layerUrl, reportUrl, traceFlow, villageNamesFrom, type RunInfo,
 } from "./api/client";
 
 const STAGE_LABELS = ["Created", "Satellite data", "Flood map", "Damage", "Cut-off routing", "Done"];
@@ -46,6 +46,7 @@ export default function App() {
   const [repairUpTo, setRepairUpTo] = useState(0); // 0 = nothing ticked
   const [compareEnabled, setCompareEnabled] = useState(false);
   const [compareValue, setCompareValue] = useState(0);
+  const [stopping, setStopping] = useState(false);
 
   // Story mode
   const [storyRunning, setStoryRunning] = useState(false);
@@ -71,9 +72,12 @@ export default function App() {
   const onToggleRank = useCallback(
     (rank: number) => setRepairUpTo((cur) => (cur >= rank ? rank - 1 : rank)), []);
 
-  const failed = run?.status === "failed";
-  const ready = !!run?.ready && !failed;
-  const running = !!runId && !ready && !failed;
+  const status = (run as any)?.status as string | undefined;
+  const failed = status === "failed";
+  const cancelled = status === "cancelled";
+  const stopped = failed || cancelled;
+  const ready = !!run?.ready && !stopped;
+  const running = !!runId && !ready && !stopped;
 
   /** Stop the story loop and sound. Does not restore the map (callers decide). */
   const haltStory = useCallback(() => {
@@ -88,24 +92,28 @@ export default function App() {
 
   useEffect(() => {
     if (!runId) return;
-    let cancelled = false;
+    let cancelledFx = false;
     haltStory();
     storyRef.current = null;
     setRun(null); setStats(null); setVillageRows([]);
     setFlowMode(false); setFlowResult(null); setFlowKm(null);
     setSelected(null); setPendingQuestion(null); setRepairUpTo(0);
-    setCompareEnabled(false); setCompareValue(0);
+    setCompareEnabled(false); setCompareValue(0); setStopping(false);
     const tick = async () => {
       try {
         const r = await getRun(runId);
-        if (cancelled) return;
+        if (cancelledFx) return;
         setRun(r);
-        if (r.ready || r.status === "failed") {
-          const s = await getStats(runId);
-          if (!cancelled) setStats(s);
+        const st = (r as any).status;
+        if (st === "cancelled") { setStopping(false); return; }   // nothing to load
+        if (r.ready || st === "failed") {
+          try {
+            const s = await getStats(runId);
+            if (!cancelledFx) setStats(s);
+          } catch { /* failed runs may have no stats */ }
           try {
             const vr = await fetch(layerUrl(runId, "villages"));
-            if (vr.ok && !cancelled) {
+            if (vr.ok && !cancelledFx) {
               const gj = await vr.json();
               setVillageRows((gj.features || []).map((f: any) => {
                 const c = f.geometry?.type === "Point" ? f.geometry.coordinates : null;
@@ -116,13 +124,26 @@ export default function App() {
           return;
         }
       } catch { /* retry */ }
-      if (!cancelled) setTimeout(tick, 2000);
+      if (!cancelledFx) setTimeout(tick, 2000);
     };
     tick();
-    return () => { cancelled = true; };
+    return () => { cancelledFx = true; };
   }, [runId, reload, haltStory]);
 
   useEffect(() => () => { haltStory(); }, [haltStory]);
+
+  const stopRun = useCallback(async () => {
+    if (!runId || !confirm("Stop this run? Satellite jobs already sent will finish their current step first.")) return;
+    setStopping(true);
+    try { await cancelRun(runId); } catch (e: any) { setStopping(false); alert(e.message || e); }
+  }, [runId]);
+
+  const onDeleted = useCallback((id: string) => {
+    if (id !== runId) return;
+    haltStory();
+    setRunId(null); setRun(null); setStats(null); setVillageRows([]);
+    setSelected(null); setFlowResult(null); setRepairUpTo(0);
+  }, [runId, haltStory]);
 
   // Villages + their damage numbers from damage_stats
   const villages = useMemo(() => {
@@ -299,6 +320,13 @@ export default function App() {
   }, [stats, run, runId, villages, storyRiver, storyLoading, endStory]);
 
   const stageIdx = ready ? 5 : Math.max(0, run?.stage_index ?? 0);
+  const statusText = failed
+    ? `Failed: ${run?.detail}`
+    : cancelled
+      ? run?.detail || "Stopped by user"
+      : stopping
+        ? "Stopping… (waits for the current step)"
+        : run?.detail || "starting…";
 
   return (
     <>
@@ -313,7 +341,8 @@ export default function App() {
             Educational prototype, not an operational tool. Results are satellite estimates and are not field-verified.
           </div>
 
-          <RunForm onSelect={(id) => { setRunId(id); setReload((n) => n + 1); }} disabled={running} />
+          <RunForm onSelect={(id) => { setRunId(id); setReload((n) => n + 1); }}
+                   onDeleted={onDeleted} disabled={running} />
 
           {runId && (
             <div className="panel">
@@ -323,7 +352,12 @@ export default function App() {
                   <div key={l} className={`step ${ready || i + 1 < stageIdx ? "done" : i + 1 === stageIdx ? "active" : ""}`}>{l}</div>
                 ))}
               </div>
-              <div className="status">{failed ? `Failed: ${run?.detail}` : run?.detail || "starting…"}</div>
+              <div className="status">{statusText}</div>
+              {running && (
+                <button className="danger" onClick={stopRun} disabled={stopping}>
+                  {stopping ? "Stopping…" : "Stop run"}
+                </button>
+              )}
               {run?.quality && <div className="muted">Data quality: <b>{run.quality.badge}</b>
                 {" "}· radar {run.quality.s1?.before_date} → {run.quality.s1?.after_date}</div>}
               {ready && (

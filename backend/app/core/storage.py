@@ -171,3 +171,38 @@ def restore_all() -> int:
     except Exception as e:
         log.warning(f"B2 restore failed: {e}")
     return n
+
+def delete_run(run_id: str) -> dict:
+    """Remove a run from Mongo and B2. Pinned demo runs are refused."""
+    if run_id in PINNED:
+        raise ValueError("Demo runs are pinned and cannot be deleted")
+    out = {"mongo": False, "b2": False}
+
+    if settings.mongo_uri:
+        try:
+            import gridfs
+            from pymongo import MongoClient
+            client = MongoClient(_mongo_uri(), serverSelectionTimeoutMS=8000)
+            fs = gridfs.GridFS(client["floodwatch"], collection="runs")
+            for f in fs.find({"filename": {"$regex": f"^{run_id}"}}):
+                fs.delete(f._id)
+                out["mongo"] = True
+        except Exception as e:
+            log.warning(f"Mongo delete failed for {run_id}: {e}")
+
+    if settings.b2_bucket:
+        try:
+            import boto3
+            ep = settings.b2_endpoint
+            if not ep.startswith("http"):
+                ep = "https://" + ep
+            s3 = boto3.client("s3", endpoint_url=ep,
+                              aws_access_key_id=settings.b2_key_id,
+                              aws_secret_access_key=settings.b2_app_key)
+            resp = s3.list_objects_v2(Bucket=settings.b2_bucket, Prefix=f"runs/{run_id}")
+            for obj in resp.get("Contents", []):
+                s3.delete_object(Bucket=settings.b2_bucket, Key=obj["Key"])
+                out["b2"] = True
+        except Exception as e:
+            log.warning(f"B2 delete failed for {run_id}: {e}")
+    return out
