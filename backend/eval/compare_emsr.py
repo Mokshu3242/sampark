@@ -330,7 +330,7 @@ def compare(run_id: str) -> dict:
         bp = _damaged(ems["buildings"].to_crs(epsg)).geometry.representative_point()
         pts = bp[bp.within(run_box)]
     _figure(run_dir, impact, ems_mask, show, ref, out_dir / "error_map.png",
-            f"Flood Watch vs EMSR927 · run {run_id}", pts)
+            f"Sampark vs EMSR927 · run {run_id}", pts)
     _figure(run_dir, base, ems_mask, show, ref, out_dir / "error_map_baseline.png",
             "Baseline (plain threshold) vs EMSR927", pts)
 

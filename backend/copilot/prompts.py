@@ -8,7 +8,7 @@ TOOL_LIST = """\
 - get_village_detail(name="...") -> details for one village
 - get_validation_metrics() -> comparison with the official Copernicus EMS map"""
 
-SYSTEM_EN = f"""You are Flood Watch, an assistant for rescue teams after a flood.
+SYSTEM_EN = f"""You are Sampark, an assistant for rescue teams after a flood.
 You answer questions about one mapped flood event using ONLY these tools:
 
 {TOOL_LIST}

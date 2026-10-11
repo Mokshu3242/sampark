@@ -12,9 +12,9 @@ from app.api import routes_runs
 from app.api import routes_images
 
 setup_logging()
-log = logging.getLogger("flood-watch")
+log = logging.getLogger("sampark")
 
-app = FastAPI(title="Flood Watch API", version="0.1.0")
+app = FastAPI(title="Sampark API", version="0.1.0")
 
 app.add_middleware(
     CORSMiddleware,
