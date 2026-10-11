@@ -11,8 +11,8 @@ import VillageCard from "./components/VillageCard";
 import ComparePanel from "./components/ComparePanel";
 import StoryPanel from "./components/StoryPanel";
 import StoryOverlay from "./components/StoryOverlay";
-import { buildStory, type StoryAction, type StoryStep } from "./story/story";
 import UnlockPanel from "./components/UnlockPanel";
+import { buildStory, type StoryAction, type StoryStep } from "./story/story";
 import {
   primeVoices,
   speak,
@@ -187,8 +187,20 @@ export default function App() {
           }
           return;
         }
-      } catch {
-        /* retry */
+      } catch (e: any) {
+        if (cancelledFx) return;
+        // The server forgot this run (it restarted mid-run). Stop polling and say so.
+        if (/not found/i.test(String(e?.message))) {
+          setStopping(false);
+          setRun({
+            run_id: runId,
+            status: "failed",
+            ready: false,
+            detail: "This run was lost because the server restarted. Please start it again.",
+          } as RunInfo);
+          return;
+        }
+        /* network blip or server waking up: retry */
       }
       if (!cancelledFx) setTimeout(tick, 2000);
     };
