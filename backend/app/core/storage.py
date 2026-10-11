@@ -15,6 +15,7 @@ PINNED = {"20261008T063513-021f3e", "20261008T230310-8ae6e4"}   # demo runs: nev
 MONGO_LIMIT = 420 * 1024 * 1024                                 # stay under the 512 MB free cap
 B2_PREFIX = "runs/"
 
+_db = None
 _fs = None
 _s3 = None
 
@@ -30,14 +31,21 @@ def _mongo_uri() -> str:
     return uri
 
 
+def mongo_db():
+    """The 'floodwatch' database, or None if Mongo is not set up."""
+    global _db
+    uri = _mongo_uri()
+    if _db is None and uri and "MONGO_PASSWORD" not in uri:
+        from pymongo import MongoClient
+        _db = MongoClient(uri, serverSelectionTimeoutMS=8000)["floodwatch"]
+    return _db
+
+
 def _mongo():
     global _fs
-    uri = _mongo_uri()
-    if _fs is None and uri and "MONGO_PASSWORD" not in uri:
+    if _fs is None and mongo_db() is not None:
         import gridfs
-        from pymongo import MongoClient
-        db = MongoClient(uri, serverSelectionTimeoutMS=8000)["floodwatch"]
-        _fs = gridfs.GridFS(db, collection="runs")
+        _fs = gridfs.GridFS(mongo_db(), collection="runs")
     return _fs
 
 
@@ -62,7 +70,7 @@ def _zip_run(run_id: str) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as z:
         for f in run_dir.rglob("*"):
-            if f.is_file() and f.name not in SKIP:
+            if f.is_file() and f.name not in SKIP and not f.name.endswith(".part"):
                 z.write(f, arcname=str(f.relative_to(run_dir)))
     return buf.getvalue()
 
@@ -72,7 +80,7 @@ def _unzip_run(run_id: str, data: bytes) -> None:
     run_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         z.extractall(run_dir)
-        for info in z.infolist():                 # keep original file times (image cache keys on them)
+        for info in z.infolist():                 # keep file times (road caches compare them)
             t = time.mktime(info.date_time + (0, 0, -1))
             os.utime(run_dir / info.filename, (t, t))
 
@@ -133,6 +141,16 @@ def _b2_list() -> list[str]:
         token = r["NextContinuationToken"]
 
 
+def _b2_get(run_id: str) -> bytes | None:
+    s3 = _b2()
+    if s3 is None:
+        return None
+    try:
+        return s3.get_object(Bucket=settings.b2_bucket, Key=f"{B2_PREFIX}{run_id}.zip")["Body"].read()
+    except Exception:
+        return None
+
+
 # ---------- public ----------
 
 def upload_run(run_id: str) -> None:
@@ -145,6 +163,44 @@ def upload_run(run_id: str) -> None:
             put(run_id, data)
         except Exception as e:
             log.warning(f"{name}: could not store {run_id}: {e}")
+
+
+def has_run(run_id: str) -> bool:
+    """Is a finished zip for this run in any store?"""
+    try:
+        fs = _mongo()
+        if fs is not None and fs.exists({"filename": run_id}):
+            return True
+    except Exception as e:
+        log.warning(f"Mongo check failed: {e}")
+    try:
+        s3 = _b2()
+        if s3 is not None:
+            s3.head_object(Bucket=settings.b2_bucket, Key=f"{B2_PREFIX}{run_id}.zip")
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def restore_run(run_id: str) -> bool:
+    """Pull one run from storage onto disk (overwrites what is there). Mongo first, then B2."""
+    data = None
+    try:
+        fs = _mongo()
+        if fs is not None:
+            g = fs.find_one({"filename": run_id})
+            if g is not None:
+                data = g.read()
+    except Exception as e:
+        log.warning(f"Mongo read failed for {run_id}: {e}")
+    if data is None:
+        data = _b2_get(run_id)
+    if data is None:
+        return False
+    _unzip_run(run_id, data)
+    log.info(f"Pulled finished run {run_id} ({len(data) / 1e6:.0f} MB)")
+    return True
 
 
 def restore_all() -> int:
@@ -172,37 +228,27 @@ def restore_all() -> int:
         log.warning(f"B2 restore failed: {e}")
     return n
 
+
 def delete_run(run_id: str) -> dict:
     """Remove a run from Mongo and B2. Pinned demo runs are refused."""
     if run_id in PINNED:
         raise ValueError("Demo runs are pinned and cannot be deleted")
     out = {"mongo": False, "b2": False}
-
-    if settings.mongo_uri:
-        try:
-            import gridfs
-            from pymongo import MongoClient
-            client = MongoClient(_mongo_uri(), serverSelectionTimeoutMS=8000)
-            fs = gridfs.GridFS(client["floodwatch"], collection="runs")
+    try:
+        fs = _mongo()
+        if fs is not None:
             for f in fs.find({"filename": {"$regex": f"^{run_id}"}}):
                 fs.delete(f._id)
                 out["mongo"] = True
-        except Exception as e:
-            log.warning(f"Mongo delete failed for {run_id}: {e}")
-
-    if settings.b2_bucket:
-        try:
-            import boto3
-            ep = settings.b2_endpoint
-            if not ep.startswith("http"):
-                ep = "https://" + ep
-            s3 = boto3.client("s3", endpoint_url=ep,
-                              aws_access_key_id=settings.b2_key_id,
-                              aws_secret_access_key=settings.b2_app_key)
-            resp = s3.list_objects_v2(Bucket=settings.b2_bucket, Prefix=f"runs/{run_id}")
+    except Exception as e:
+        log.warning(f"Mongo delete failed for {run_id}: {e}")
+    try:
+        s3 = _b2()
+        if s3 is not None:
+            resp = s3.list_objects_v2(Bucket=settings.b2_bucket, Prefix=f"{B2_PREFIX}{run_id}")
             for obj in resp.get("Contents", []):
                 s3.delete_object(Bucket=settings.b2_bucket, Key=obj["Key"])
                 out["b2"] = True
-        except Exception as e:
-            log.warning(f"B2 delete failed for {run_id}: {e}")
+    except Exception as e:
+        log.warning(f"B2 delete failed for {run_id}: {e}")
     return out

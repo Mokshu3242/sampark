@@ -14,6 +14,29 @@ def _stopped(registry: RunRegistry, run_id: str, where: str) -> dict:
     return {"cancelled_at": where}
 
 
+def _build_caches(run_id: str) -> None:
+    """Pre-make everything the web app would otherwise build on first view."""
+    run_dir = settings.runs_dir / run_id
+    try:
+        from pipeline.hydrology import damaged_roads_path
+        damaged_roads_path(run_dir)
+    except Exception as e:
+        log.warning(f"Damaged-roads cache not built: {e}")
+    try:
+        from app.api.routes_runs import _roads_web
+        _roads_web(run_dir)
+    except Exception as e:
+        log.warning(f"Web roads cache not built: {e}")
+    try:
+        from app.api.routes_images import LAYERS, PRERENDER, cached_image
+        for name, widths in PRERENDER.items():
+            if (run_dir / LAYERS[name]["file"]).exists():
+                for w in widths:
+                    cached_image(run_id, name, w)
+    except Exception as e:
+        log.warning(f"Image cache not built: {e}")
+
+
 def run_pipeline(run_id: str, bbox: list[float], flood_date: date, window_days: int = 30) -> dict:
     """Entry point. Marks the run as live in this process, so the API knows it's really running."""
     cancel.ACTIVE.add(run_id)
@@ -64,11 +87,13 @@ def _run_pipeline(run_id: str, bbox: list[float], flood_date: date, window_days:
     if cancel.requested(run_dir):
         return _stopped(registry, run_id, "flow cache")
 
+    registry.set_status(run_id, "cutoff", "Building flow and map caches")
     try:
         from pipeline import hydrology
         hydrology.build_hydro(run_dir)
     except Exception as e:                      # bonus feature: never fail the run for it
         log.warning(f"Flow cache not built: {e}")
+    _build_caches(run_id)
 
     if cancel.requested(run_dir):
         return _stopped(registry, run_id, "saving")

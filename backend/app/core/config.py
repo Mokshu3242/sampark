@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     b2_app_key: str = ""
     b2_bucket: str = ""
 
+    # Where the heavy pipeline runs: "local" (this machine) or "github" (GitHub Actions)
+    pipeline_mode: str = "local"
+    gh_token: str = ""                    # fine-grained token, Actions: read and write
+    gh_repo: str = "Mokshu3242/sampark"
+    gh_workflow: str = "pipeline.yml"
+    gh_ref: str = "main"
+
     runs_dir: Path = BACKEND / "data" / "runs"
 
     @property

@@ -6,13 +6,13 @@ from io import BytesIO
 
 import geopandas as gpd
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from app.core.auth import require_key
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 
-from app.core.heavy import HEAVY
-from app.core import storage
+from app.core import remote, storage
+from app.core.auth import require_key
 from app.core.config import settings
+from app.core.heavy import HEAVY
 from app.core.run_registry import RunRegistry
 from app.schemas.run import RunRequest
 from copilot.agent import ask as copilot_ask
@@ -27,7 +27,6 @@ from pipeline.run_all import run_pipeline
 
 router = APIRouter(prefix="/runs", tags=["runs"])
 registry = RunRegistry(settings.runs_dir)
-
 LOCKED = [Depends(require_key)]
 
 LAYER_FILES = {
@@ -57,6 +56,11 @@ class FlowRequest(BaseModel):
 
 def _run_dir(run_id: str):
     d = settings.runs_dir / run_id
+    if not (d / "request.json").exists() and remote.github_mode():
+        try:
+            remote.ensure_local(run_id, registry)     # cloud run, server restarted meanwhile
+        except Exception:
+            pass
     if not d.exists() or not (d / "request.json").exists():
         raise HTTPException(404, "run not found")
     return d
@@ -88,7 +92,17 @@ def _roads_web(run_dir):
 
 @router.post("", dependencies=LOCKED)
 def create_run(req: RunRequest, bg: BackgroundTasks):
-    run_id = registry.new_run(req.model_dump(mode="json"))
+    body = req.model_dump(mode="json")
+    run_id = registry.new_run(body)
+    if remote.github_mode():
+        try:
+            remote.push_status(run_id, registry.get_status(run_id), request=body)
+            remote.dispatch(run_id, body)
+            registry.set_status(run_id, "created", "Queued on the cloud worker. Starting in about a minute…")
+        except Exception as e:
+            registry.set_status(run_id, "failed", f"Could not start the cloud worker: {str(e)[:150]}")
+            raise HTTPException(502, f"Could not start the cloud worker: {str(e)[:150]}")
+        return {"run_id": run_id, "status": "queued"}
     bg.add_task(run_pipeline, run_id, req.bbox, req.flood_date, req.window_days)
     return {"run_id": run_id, "status": "created"}
 
@@ -101,6 +115,11 @@ def list_runs(limit: int = 30):
 @router.get("/{run_id}")
 def get_run(run_id: str):
     run_dir = _run_dir(run_id)
+    if remote.github_mode() and run_id not in cancel.ACTIVE:
+        try:
+            remote.sync(run_id, registry)
+        except Exception:
+            pass                                       # a Mongo blip should not break polling
     q = run_dir / "quality.json"
     return {
         "run_id": run_id,
@@ -116,13 +135,19 @@ def get_run(run_id: str):
 @router.post("/{run_id}/cancel", dependencies=LOCKED)
 def cancel_run(run_id: str):
     d = _run_dir(run_id)
-    if run_id not in cancel.ACTIVE:
-        # Not running here (finished, or stuck after a restart). Mark it so the UI stops waiting.
-        if _status_of(run_id) not in FINISHED:
-            registry.set_status(run_id, "cancelled", "Stopped (was not running)")
-        return {"ok": True, "status": "cancelled"}
-    cancel.request(d)
-    return {"ok": True, "status": "cancelling"}
+    if run_id in cancel.ACTIVE:                        # running in this process
+        cancel.request(d)
+        return {"ok": True, "status": "cancelling"}
+    status = _status_of(run_id)
+    if status in FINISHED:
+        return {"ok": True, "status": status}
+    if remote.github_mode() and remote.is_live(run_id):
+        remote.request_cancel(run_id)
+        registry.set_status(run_id, status or "created", "Stopping… (the cloud worker checks every 10 s)")
+        return {"ok": True, "status": "cancelling"}
+    # Not running anywhere (stuck after a restart): mark it so the UI stops waiting
+    registry.set_status(run_id, "cancelled", "Stopped (was not running)")
+    return {"ok": True, "status": "cancelled"}
 
 
 @router.delete("/{run_id}", dependencies=LOCKED)
@@ -131,6 +156,15 @@ def delete_run(run_id: str):
         raise HTTPException(403, "Demo runs cannot be deleted")
     if run_id in cancel.ACTIVE:
         raise HTTPException(409, "Run is still going. Stop it first.")
+    if remote.github_mode():
+        try:
+            if remote.is_live(run_id):
+                raise HTTPException(409, "Run is still going on the cloud worker. Stop it first.")
+            remote.forget(run_id)
+        except HTTPException:
+            raise
+        except Exception:
+            pass
     d = settings.runs_dir / run_id
     if d.exists():
         shutil.rmtree(d, ignore_errors=True)
