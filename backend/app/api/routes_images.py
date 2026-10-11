@@ -2,6 +2,7 @@
 Every raster is warped to Web Mercator first, so the 4 corners line up exactly on the map."""
 import logging
 import re
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 
@@ -12,10 +13,11 @@ from fastapi.responses import Response
 from PIL import Image
 from pyproj import Transformer
 from rasterio.warp import Resampling, calculate_default_transform, reproject
+from rasterio.windows import from_bounds
 
 from app.core.config import settings
-from functools import lru_cache
-from rasterio.windows import from_bounds
+from app.core.heavy import HEAVY
+from app.core.memtrim import trim
 
 log = logging.getLogger("flood-watch.images")
 router = APIRouter(prefix="/runs", tags=["images"])
@@ -34,6 +36,9 @@ LAYERS = {
     "s2_after": {"file": "s2_after.tif", "mode": "rgb", "bands": [3, 2, 1], "stretch": (2, 98), "gamma": 0.9},
 }
 FALLBACK_RGB = [3, 2, 1]   # used only if band names don't say B04/B03/B02
+
+# Widths the frontend asks for. scripts/prerender_images.py builds these ahead of time.
+PRERENDER = {"uncertainty": [2400], "dem": [1400], "s2_before": [1400], "s2_after": [1400]}
 
 
 def _path(run_id: str, name: str) -> Path:
@@ -75,6 +80,7 @@ def _warp(path: Path, bands: list[int] | None, resampling: Resampling, width: in
             reproject(src, out[i], src_transform=ds.transform, src_crs=ds.crs,
                       src_nodata=np.nan, dst_transform=tr, dst_crs=WEB, dst_nodata=np.nan,
                       resampling=resampling)
+            del src                                # one band in memory at a time
         left, top = tr.c, tr.f
         right, bottom = left + tr.a * ow, top + tr.e * oh
     return out, (left, bottom, right, top)
@@ -145,36 +151,60 @@ def _render(path: Path, name: str, width: int):
     raise HTTPException(500, "render mode not implemented")
 
 
-def _cached(run_id: str, name: str, width: int):
-    path = _path(run_id, name)
-    stamp = int(path.stat().st_mtime)
-    png = path.parent / f"cache_{name}_{width}_{stamp}.png"
-    meta = png.with_suffix(".bounds")
+def _cache_paths(path: Path, name: str, width: int) -> tuple[Path, Path]:
+    # Keyed on file SIZE, not mtime: zips round times to 2 s and drop the time zone,
+    # so an mtime key never matches after a restore on the server.
+    stamp = path.stat().st_size
+    png = path.parent / f"cache_{name}_{width}_s{stamp}.png"
+    return png, png.with_suffix(".bounds")
+
+
+def _read_cache(png: Path, meta: Path):
     if png.exists() and meta.exists():
         return png.read_bytes(), [float(x) for x in meta.read_text().split(",")]
-    img, mb = _render(path, name, width)
-    buf = BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    for old in path.parent.glob(f"cache_{name}_{width}_*"):   # drop stale versions
-        old.unlink(missing_ok=True)
-    png.write_bytes(buf.getvalue())
-    meta.write_text(",".join(str(x) for x in mb))
-    return buf.getvalue(), list(mb)
+    return None
+
+
+def cached_image(run_id: str, name: str, width: int):
+    path = _path(run_id, name)
+    png, meta = _cache_paths(path, name, width)
+    hit = _read_cache(png, meta)
+    if hit:
+        return hit
+
+    with HEAVY:                                   # one render at a time
+        hit = _read_cache(png, meta)              # another request may have made it meanwhile
+        if hit:
+            return hit
+        log.info(f"Rendering {name} at {width} px for {run_id}")
+        try:
+            img, mb = _render(path, name, width)
+            buf = BytesIO()
+            img.save(buf, format="PNG", optimize=True)
+            del img
+            for old in path.parent.glob(f"cache_{name}_{width}_*"):   # drop stale versions
+                old.unlink(missing_ok=True)
+            png.write_bytes(buf.getvalue())
+            meta.write_text(",".join(str(x) for x in mb))
+            return buf.getvalue(), list(mb)
+        finally:
+            trim(f"render {name}")
 
 
 @router.get("/{run_id}/image/{name}.png")
 def get_image(run_id: str, name: str, width: int = Query(1400, ge=200, le=2500)):
-    data, _ = _cached(run_id, name, width)
+    data, _ = cached_image(run_id, name, width)
     return Response(data, media_type="image/png", headers={"Cache-Control": "public, max-age=3600"})
 
 
 @router.get("/{run_id}/image/{name}/bounds")
 def get_image_bounds(run_id: str, name: str, width: int = Query(1400, ge=200, le=2500)):
-    _, mb = _cached(run_id, name, width)
+    _, mb = cached_image(run_id, name, width)
     return {"coordinates": _corners(mb)}
 
+
 @lru_cache(maxsize=16)
-def _global_stretch(path_str: str, mtime: float, bands: tuple, stretch: tuple) -> tuple[float, float]:
+def _global_stretch(path_str: str, size: int, bands: tuple, stretch: tuple) -> tuple[float, float]:
     """One colour stretch for the whole image, so every chip matches the big overlay."""
     with rasterio.open(path_str) as ds:
         arr = ds.read(list(bands), out_shape=(len(bands), max(1, ds.height // 4), max(1, ds.width // 4))).astype("float32")
@@ -208,7 +238,7 @@ def get_chip(run_id: str, name: str, lon: float, lat: float,
     valid = np.all(arr != 0, axis=0)
     if nod is not None:
         valid &= np.all(arr != nod, axis=0)
-    lo, hi = _global_stretch(str(path), path.stat().st_mtime, tuple(bands), tuple(spec["stretch"]))
+    lo, hi = _global_stretch(str(path), path.stat().st_size, tuple(bands), tuple(spec["stretch"]))
     rgb = np.clip((arr - lo) / (hi - lo), 0, 1) ** spec["gamma"]
     out = np.zeros((px, px, 4), dtype=np.uint8)
     out[..., :3] = (rgb.transpose(1, 2, 0) * 255).astype(np.uint8)

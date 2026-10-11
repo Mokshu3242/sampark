@@ -10,6 +10,7 @@ from app.core.auth import require_key
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from pydantic import BaseModel
 
+from app.core.heavy import HEAVY
 from app.core import storage
 from app.core.config import settings
 from app.core.run_registry import RunRegistry
@@ -245,22 +246,23 @@ def get_eval(run_id: str):
 
 @router.post("/{run_id}/flowpath")
 def flowpath(run_id: str, body: FlowRequest):
+    from app.core.memtrim import trim
     run_dir = _run_dir(run_id)
     if not (1 <= body.snap_px <= 50):
         raise HTTPException(400, "snap_px must be 1 to 50")
-    try:
-        feature = trace_flow(run_dir, body.lon, body.lat, body.snap_px)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except RuntimeError as e:
-        raise HTTPException(409, str(e))
-    from app.core.memtrim import trim
-    try:
-        return {
-            "path": feature,
-            "villages": villages_along(feature, run_dir, body.buffer_m),
-            "buffer_m": body.buffer_m,
-            "corridor": corridor_events(feature, run_dir, village_buffer_m=body.buffer_m),
-        }
-    finally:
-        trim("flowpath")
+    with HEAVY:
+        try:
+            try:
+                feature = trace_flow(run_dir, body.lon, body.lat, body.snap_px)
+            except ValueError as e:
+                raise HTTPException(400, str(e))
+            except RuntimeError as e:
+                raise HTTPException(409, str(e))
+            return {
+                "path": feature,
+                "villages": villages_along(feature, run_dir, body.buffer_m),
+                "buffer_m": body.buffer_m,
+                "corridor": corridor_events(feature, run_dir, village_buffer_m=body.buffer_m),
+            }
+        finally:
+            trim("flowpath")
