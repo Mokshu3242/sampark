@@ -107,10 +107,13 @@ def dispatch(run_id: str, request: dict) -> None:
 # ---------- server side ----------
 
 def ensure_local(run_id: str, registry) -> bool:
-    """After a server restart, rebuild the folder of a cloud run from Mongo."""
+    """After a server restart (or a run started by hand), rebuild the run folder here."""
     d = get_doc(run_id)
-    if not d or not d.get("request"):
+    if not d:
         return False
+    if not d.get("request"):
+        # No request saved: if the worker finished, just pull the whole run
+        return storage.restore_run(run_id)
     run_dir = settings.runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "request.json").write_text(json.dumps(d["request"], indent=2, ensure_ascii=False), encoding="utf-8")

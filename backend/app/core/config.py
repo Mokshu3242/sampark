@@ -3,6 +3,7 @@ from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator
 
 BACKEND = Path(__file__).resolve().parents[2]   # backend/
 REPO = BACKEND.parent                            # repo root
@@ -80,6 +81,12 @@ class Settings(BaseSettings):
 
     def missing_keys(self) -> list[str]:
         return [] if self.available_llms() else ["no LLM provider has a key"]
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _strip(cls, v):
+        """Pasted secrets often carry a trailing newline or spaces."""
+        return v.strip() if isinstance(v, str) else v
 
 
 settings = Settings()
