@@ -14,6 +14,7 @@ import StoryOverlay from "./components/StoryOverlay";
 import UnlockPanel from "./components/UnlockPanel";
 import { buildStory, type StoryAction, type StoryStep } from "./story/story";
 import {
+  isSpeaking,
   primeVoices,
   speak,
   startRiver,
@@ -41,6 +42,7 @@ const STAGE_LABELS = [
   "Cut-off routing",
   "Done",
 ];
+const MAX_HOLD_MS = 12000; // never wait longer than this for one sentence
 const same = (a: any, b: any) =>
   String(a ?? "").toLowerCase() === String(b ?? "").toLowerCase();
 const low = (s: any) => String(s ?? "").toLowerCase();
@@ -58,6 +60,8 @@ type StoryState = {
   flow: any;
   raf: number;
   lastUi: number;
+  lastNow: number;
+  held: number; // ms spent waiting for the current sentence
   snap: {
     visible: Record<string, boolean>;
     compareEnabled: boolean;
@@ -437,8 +441,9 @@ export default function App() {
       repairPt: repV ? { lon: repV._lon, lat: repV._lat } : null,
     });
 
+    const t0 = performance.now();
     const s: StoryState = {
-      start: performance.now(),
+      start: t0,
       steps,
       total,
       fired: new Set(),
@@ -447,6 +452,8 @@ export default function App() {
       flow,
       raf: 0,
       lastUi: 0,
+      lastNow: t0,
+      held: 0,
       snap: { ...liveRef.current },
     };
     storyRef.current = s;
@@ -456,10 +463,29 @@ export default function App() {
 
     const loop = (now: number) => {
       if (storyRef.current !== s) return; // stopped or replaced
-      const t = (now - s.start) / 1000;
+      const dt = now - s.lastNow;
+      s.lastNow = now;
+      let t = (now - s.start) / 1000;
+
+      // Voice on: if the next step (or the end) is due but a sentence is still playing,
+      // freeze the story clock until the sentence ends. Capped so a silent browser can't hang it.
+      if (voiceRef.current) {
+        const nextAt = s.steps.reduce(
+          (m, st, i) => (s.fired.has(i) ? m : Math.min(m, st.at)),
+          Infinity,
+        );
+        const due = Math.min(nextAt, s.total);
+        if (t >= due && isSpeaking() && s.held < MAX_HOLD_MS) {
+          s.start += dt;
+          s.held += dt;
+          t = (now - s.start) / 1000;
+        }
+      }
+
       s.steps.forEach((st, i) => {
         if (s.fired.has(i) || t < st.at) return;
         s.fired.add(i);
+        s.held = 0;
         setCaption(st.caption);
         if (voiceRef.current) speak(st.caption);
         for (const a of st.actions ?? []) runAction(s, a, t);
@@ -472,7 +498,7 @@ export default function App() {
       });
       if (now - s.lastUi > 100) {
         s.lastUi = now;
-        setStoryProgress(t / s.total);
+        setStoryProgress(Math.min(1, t / s.total));
       }
       if (t >= s.total) {
         endStory();

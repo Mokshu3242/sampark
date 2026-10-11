@@ -254,9 +254,13 @@ def flowpath(run_id: str, body: FlowRequest):
         raise HTTPException(400, str(e))
     except RuntimeError as e:
         raise HTTPException(409, str(e))
-    return {
-        "path": feature,
-        "villages": villages_along(feature, run_dir, body.buffer_m),
-        "buffer_m": body.buffer_m,
-        "corridor": corridor_events(feature, run_dir, village_buffer_m=body.buffer_m),
-    }
+    from app.core.memtrim import trim
+    try:
+        return {
+            "path": feature,
+            "villages": villages_along(feature, run_dir, body.buffer_m),
+            "buffer_m": body.buffer_m,
+            "corridor": corridor_events(feature, run_dir, village_buffer_m=body.buffer_m),
+        }
+    finally:
+        trim("flowpath")

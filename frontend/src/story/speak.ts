@@ -5,6 +5,12 @@ let riverCtx: AudioContext | null = null;
 let riverGain: GainNode | null = null;
 let riverSrc: AudioBufferSourceNode | null = null;
 
+// Keep the live utterance referenced: Chrome can garbage-collect it and skip onend.
+let current: SpeechSynthesisUtterance | null = null;
+let speaking = false;
+
+const RATE = 1.05;
+
 /** Chrome fills the voice list later, so ask early. */
 export function primeVoices(): void {
   if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
@@ -20,20 +26,40 @@ function pickVoice(): SpeechSynthesisVoice | undefined {
     ?? en[0];
 }
 
+/** True while a sentence is still being spoken. */
+export function isSpeaking(): boolean {
+  if (typeof window === "undefined" || !("speechSynthesis" in window)) return false;
+  try {
+    return speaking || window.speechSynthesis.speaking || window.speechSynthesis.pending;
+  } catch {
+    return speaking;
+  }
+}
+
 export function speak(text: string): void {
   if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
   try {
-    window.speechSynthesis.cancel();
+    window.speechSynthesis.cancel();          // only cuts if the story had to move on anyway
     const u = new SpeechSynthesisUtterance(text);
     u.lang = "en-US";
-    u.rate = 0.98;
+    u.rate = RATE;
+    u.pitch = 1;
     const v = pickVoice();
     if (v) u.voice = v;
+    const done = () => { if (current === u) { speaking = false; current = null; } };
+    u.onend = done;
+    u.onerror = done;
+    current = u;
+    speaking = true;
     window.speechSynthesis.speak(u);
-  } catch { /* no voice */ }
+  } catch {
+    speaking = false;
+  }
 }
 
 export function stopSpeaking(): void {
+  speaking = false;
+  current = null;
   if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
   try { window.speechSynthesis.cancel(); } catch { /* ignore */ }
 }

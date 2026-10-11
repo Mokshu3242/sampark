@@ -42,6 +42,8 @@ def _restore():
         RESTORE["error"] = str(e)[:200]
     finally:
         RESTORE["done"] = True
+        from app.core.memtrim import trim
+        trim("restore")
 
 
 @app.on_event("startup")
