@@ -25,3 +25,5 @@ backend/data/emsr927/
 *.tif
 cache_*.png
 cache_*.bounds
+
+backend/demo_runs.zip
