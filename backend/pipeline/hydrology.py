@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import rasterio
 from pyproj import Geod, Transformer
+from rasterio.windows import Window
 from scipy.ndimage import distance_transform_edt
 from shapely.geometry import LineString
 
@@ -21,12 +22,27 @@ STEP = {64: (-1, 0), 128: (-1, 1), 1: (0, 1), 2: (1, 1),
 MAX_STEPS = 50_000     # safety cap
 SNAP_PX = 5            # snap a click to the main channel within 5 px (100 m at 20 m)
 SIMPLIFY_DEG = 0.0001  # about 10 m
+TILE = 256             # flow_dir is read in tiles this size along the path
+MAX_TILES = 64         # tile cache cap (64 x 256 x 256 x int32 = 16 MB)
 GEOD = Geod(ellps="WGS84")
 ROAD_KIND = {"likely_cut": "road_cut", "bridge_lost": "bridge_lost", "affected": "road_affected"}
 
 
 if not hasattr(np, "in1d"):
     np.in1d = lambda a, b, *args, **kw: np.isin(np.ravel(a), b, *args, **kw)
+
+
+def rss_mb() -> float:
+    """Current memory of this process in MB (Linux). -1 elsewhere."""
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return round(int(line.split()[1]) / 1024, 1)
+    except OSError:
+        pass
+    return -1.0
+
 
 def _fill_nodata(dem: np.ndarray) -> np.ndarray:
     """Fill holes with the nearest valid height (no fake ridges)."""
@@ -39,10 +55,14 @@ def _fill_nodata(dem: np.ndarray) -> np.ndarray:
     return dem[tuple(idx)]
 
 
+def hydro_ready(run_dir: Path) -> bool:
+    return (run_dir / "flow_dir.tif").exists() and (run_dir / "flow_acc.tif").exists()
+
+
 def build_hydro(run_dir: Path, force: bool = False) -> tuple[Path, Path]:
-    """Flow direction + accumulation, computed once per run and cached."""
+    """Flow direction + accumulation, computed once per run and cached. Heavy: pipeline only."""
     fdir_path, facc_path = run_dir / "flow_dir.tif", run_dir / "flow_acc.tif"
-    if fdir_path.exists() and facc_path.exists() and not force:
+    if hydro_ready(run_dir) and not force:
         return fdir_path, facc_path
 
     dem_path = run_dir / "dem.tif"
@@ -60,27 +80,30 @@ def build_hydro(run_dir: Path, force: bool = False) -> tuple[Path, Path]:
     arr[arr < -500] = np.nan               # sea-level junk / -32768 leftovers
     arr = _fill_nodata(arr)
 
-    log.info("Computing flow direction (first time only, about 30 s)")
+    log.info(f"Computing flow direction (first time only, about 30 s). Memory {rss_mb()} MB")
     grid = Grid.from_raster(str(dem_path))
     base = grid.read_raster(str(dem_path))
     dem = Raster(arr, viewfinder=base.viewfinder)
+    del arr
 
     dem = grid.fill_pits(dem)
     dem = grid.fill_depressions(dem)
     dem = grid.resolve_flats(dem)
     fdir = grid.flowdir(dem, dirmap=DIRMAP)
+    del dem
     facc = grid.accumulation(fdir, dirmap=DIRMAP)
 
     for k in ("nodata", "blockxsize", "blockysize", "tiled"):
         profile.pop(k, None)
-    profile.update(count=1, compress="deflate")
+    profile.update(count=1, compress="deflate", tiled=True, blockxsize=TILE, blockysize=TILE)
     with rasterio.open(fdir_path, "w", **{**profile, "dtype": "int32", "nodata": 0}) as ds:
         ds.write(np.asarray(fdir).astype("int32"), 1)
     with rasterio.open(facc_path, "w", **{**profile, "dtype": "float32", "nodata": -1}) as ds:
         ds.write(np.asarray(facc).astype("float32"), 1)
 
-    log.info("Wrote flow_dir.tif and flow_acc.tif")
+    log.info(f"Wrote flow_dir.tif and flow_acc.tif. Memory {rss_mb()} MB")
     return fdir_path, facc_path
+
 
 def _pixel_area_m2(T, crs, lat: float) -> float:
     """Pixel area in m², for projected (metres) or geographic (degrees) DEMs."""
@@ -91,40 +114,63 @@ def _pixel_area_m2(T, crs, lat: float) -> float:
     return abs(T.a) * m_per_deg_lon * abs(T.e) * m_per_deg_lat
 
 
+class _TileReader:
+    """Reads one band in small tiles on demand, so a trace never loads the whole raster."""
+
+    def __init__(self, ds):
+        self.ds, self.H, self.W = ds, ds.height, ds.width
+        self.cache: dict[tuple[int, int], np.ndarray] = {}
+
+    def get(self, r: int, c: int) -> int:
+        key = (r // TILE, c // TILE)
+        tile = self.cache.get(key)
+        if tile is None:
+            if len(self.cache) >= MAX_TILES:
+                self.cache.clear()
+            r0, c0 = key[0] * TILE, key[1] * TILE
+            win = Window(c0, r0, min(TILE, self.W - c0), min(TILE, self.H - r0))
+            tile = self.cache[key] = self.ds.read(1, window=win)
+        return int(tile[r - key[0] * TILE, c - key[1] * TILE])
+
+
 def trace(run_dir: Path, lon: float, lat: float, snap_px: int = SNAP_PX) -> dict:
-    """Walk downstream from a click. Returns a GeoJSON Feature (LineString in lon/lat)."""
-    fdir_path, facc_path = build_hydro(run_dir)
-    with rasterio.open(fdir_path) as ds:
-        fdir, T, crs = ds.read(1), ds.transform, ds.crs
-        H, W = ds.height, ds.width
-    with rasterio.open(facc_path) as ds:
-        facc = ds.read(1)
+    """Walk downstream from a click. Returns a GeoJSON Feature (LineString in lon/lat).
+    Reads only small windows of the flow rasters, so memory stays low on small servers."""
+    if not hydro_ready(run_dir):
+        raise RuntimeError("Flow data not built for this run. It is made when the pipeline finishes.")
+    fdir_path, facc_path = run_dir / "flow_dir.tif", run_dir / "flow_acc.tif"
+    mem0 = rss_mb()
 
-    x, y = Transformer.from_crs(4326, crs, always_xy=True).transform(lon, lat)
-    cf, rf = ~T * (x, y)
-    r, c = int(np.floor(rf)), int(np.floor(cf))
-    if not (0 <= r < H and 0 <= c < W):
-        raise ValueError("That point is outside this run's area")
+    with rasterio.open(fdir_path) as fds, rasterio.open(facc_path) as ads:
+        T, crs, H, W = fds.transform, fds.crs, fds.height, fds.width
 
-    # Snap to the strongest channel nearby, so a click near the river follows the river
-    r0, r1 = max(0, r - snap_px), min(H, r + snap_px + 1)
-    c0, c1 = max(0, c - snap_px), min(W, c + snap_px + 1)
-    sub = facc[r0:r1, c0:c1]
-    dr, dc = np.unravel_index(int(np.argmax(sub)), sub.shape)
-    snapped = (r0 + dr, c0 + dc) != (r, c)
-    r, c = r0 + dr, c0 + dc
+        x, y = Transformer.from_crs(4326, crs, always_xy=True).transform(lon, lat)
+        cf, rf = ~T * (x, y)
+        r, c = int(np.floor(rf)), int(np.floor(cf))
+        if not (0 <= r < H and 0 <= c < W):
+            raise ValueError("That point is outside this run's area")
 
-    rows, cols, seen = [r], [c], {(r, c)}
-    for _ in range(MAX_STEPS):
-        step = STEP.get(int(fdir[r, c]))
-        if step is None:                       # pit, flat or nodata
-            break
-        nr, nc = r + step[0], c + step[1]
-        if not (0 <= nr < H and 0 <= nc < W) or (nr, nc) in seen:
-            break
-        seen.add((nr, nc))
-        rows.append(nr); cols.append(nc)
-        r, c = nr, nc
+        # Snap to the strongest channel nearby, so a click near the river follows the river
+        r0, r1 = max(0, r - snap_px), min(H, r + snap_px + 1)
+        c0, c1 = max(0, c - snap_px), min(W, c + snap_px + 1)
+        sub = ads.read(1, window=Window(c0, r0, c1 - c0, r1 - r0))
+        dr, dc = np.unravel_index(int(np.argmax(sub)), sub.shape)
+        snapped = (r0 + dr, c0 + dc) != (r, c)
+        r, c = r0 + dr, c0 + dc
+        start_acc = float(sub[dr, dc])
+
+        fdir = _TileReader(fds)
+        rows, cols, seen = [r], [c], {(r, c)}
+        for _ in range(MAX_STEPS):
+            step = STEP.get(fdir.get(r, c))
+            if step is None:                       # pit, flat or nodata
+                break
+            nr, nc = r + step[0], c + step[1]
+            if not (0 <= nr < H and 0 <= nc < W) or (nr, nc) in seen:
+                break
+            seen.add((nr, nc))
+            rows.append(nr); cols.append(nc)
+            r, c = nr, nc
 
     if len(rows) < 2:
         raise ValueError("Water from that point does not flow anywhere on this DEM. Click closer to a river.")
@@ -137,6 +183,7 @@ def trace(run_dir: Path, lon: float, lat: float, snap_px: int = SNAP_PX) -> dict
     if len(simple.coords) < 2:
         simple = line
 
+    log.info(f"Flow trace: {len(rows)} px, {length_km:.1f} km. Memory {mem0} -> {rss_mb()} MB")
     end_lon, end_lat = lons[-1], lats[-1]
     left_map = rows[-1] in (0, H - 1) or cols[-1] in (0, W - 1)
     return clean({
@@ -148,7 +195,7 @@ def trace(run_dir: Path, lon: float, lat: float, snap_px: int = SNAP_PX) -> dict
             "length_km": round(length_km, 2),
             "snapped_to_channel": bool(snapped),
             "ends": "leaves the map" if left_map else "stops in a basin",
-            "upstream_area_km2": round(float(facc[rows[0], cols[0]]) * _pixel_area_m2(T, crs, lats[0]) / 1e6, 1),
+            "upstream_area_km2": round(start_acc * _pixel_area_m2(T, crs, lats[0]) / 1e6, 1),
         },
         "geometry": {"type": "LineString",
                      "coordinates": [[round(a, 6), round(b, 6)] for a, b in simple.coords]},
@@ -192,6 +239,7 @@ def villages_along(feature: dict, run_dir: Path, buffer_m: float = 500.0) -> lis
         })
     return clean(out)
 
+
 def corridor_events(feature: dict, run_dir: Path, buffer_m: float = 300.0,
                     village_buffer_m: float = 500.0) -> dict:
     """Observed damage along the traced path, ordered by distance downstream.
@@ -208,6 +256,9 @@ def corridor_events(feature: dict, run_dir: Path, buffer_m: float = 300.0,
         cum.append(cum[-1] + math.hypot(x1 - x0, y1 - y0))
     zone = lm.buffer(buffer_m)
     vzone = lm.buffer(village_buffer_m)
+    # Only read features near the path (bbox filter at read time keeps memory low)
+    zone_ll = gpd.GeoSeries([vzone], crs=utm).to_crs(4326).total_bounds
+    bbox = tuple(float(v) for v in zone_ll)
 
     events: list[dict] = []
     geoms = []
@@ -216,11 +267,17 @@ def corridor_events(feature: dict, run_dir: Path, buffer_m: float = 300.0,
         events.append(props)
         geoms.append(geom.representative_point())
 
+    def read_near(p: Path, **kw):
+        try:
+            return gpd.read_file(p, bbox=bbox, **kw)
+        except Exception:                          # file CRS differs or driver lacks bbox support
+            return gpd.read_file(p, **kw)
+
     # Roads: cut, bridge lost, affected
     p = run_dir / "road_edges.geojson"
     if p.exists():
-        r = gpd.read_file(p, where="status IN ('likely_cut', 'bridge_lost', 'affected')")
-        r = r[r["status"].isin(list(ROAD_KIND))]
+        r = read_near(p, where="status IN ('likely_cut', 'bridge_lost', 'affected')")
+        r = r[r["status"].isin(list(ROAD_KIND))] if not r.empty else r
         if not r.empty:
             r = r.to_crs(utm)
             r = r[r.intersects(zone)]
@@ -233,7 +290,7 @@ def corridor_events(feature: dict, run_dir: Path, buffer_m: float = 300.0,
         p = run_dir / fname
         if not p.exists():
             continue
-        g = gpd.read_file(p)
+        g = read_near(p)
         if g.empty:
             continue
         g = g.to_crs(utm)
@@ -252,7 +309,7 @@ def corridor_events(feature: dict, run_dir: Path, buffer_m: float = 300.0,
             dmg[s.get("name")] = s
     p = run_dir / "cutoff.geojson"
     if p.exists():
-        v = gpd.read_file(p)
+        v = read_near(p)
         if not v.empty:
             v = v.to_crs(utm)
             v = v[v.intersects(vzone)]
@@ -283,5 +340,6 @@ def corridor_events(feature: dict, run_dir: Path, buffer_m: float = 300.0,
         "debris_ha": round(sum(e.get("area_ha", 0) for e in events if e["kind"] == "debris"), 1),
         "flood_ha": round(sum(e.get("area_ha", 0) for e in events if e["kind"] == "flood"), 1),
     }
+    log.info(f"Corridor: {len(events)} events. Memory {rss_mb()} MB")
     return clean({"cum_km": [round(c / 1000, 3) for c in cum], "events": events,
                   "totals": totals, "buffer_m": buffer_m, "village_buffer_m": village_buffer_m})
