@@ -2,21 +2,38 @@ name: Keep backend awake
 
 on:
   schedule:
-    - cron: "*/5 * * * *"     # every 5 minutes (GitHub may run it late)
-  workflow_dispatch:           # lets you run it by hand from the Actions tab
+    - cron: "*/5 * 14-22 10 *"     # every 5 min, Oct 14-22 (UTC). Exact window checked below.
+  workflow_dispatch: {}            # "Run workflow" button for a manual test
 
 jobs:
   ping:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     steps:
-      - name: Ping backend
+      - name: Check judging window
+        id: window
         run: |
-          for i in 1 2 3; do
-            code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 90 "$BACKEND_URL/health") && \
-              echo "Attempt $i: HTTP $code" && [ "$code" = "200" ] && exit 0
-            sleep 10
-          done
-          echo "Backend did not answer with 200"; exit 1
+          START="2026-10-14T04:00:00Z"   # Oct 14, 00:00 EDT
+          END="2026-10-22T04:00:00Z"     # Oct 21, 23:59 EDT
+          NOW=$(date -u +%s)
+          if [ "$NOW" -ge "$(date -u -d "$START" +%s)" ] && [ "$NOW" -lt "$(date -u -d "$END" +%s)" ]; then
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Outside the window, but run by hand: pinging anyway."
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Outside $START to $END. Skipping."
+            echo "active=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Ping /health
+        if: steps.window.outputs.active == 'true'
         env:
           BACKEND_URL: ${{ secrets.BACKEND_URL }}
+        run: |
+          if [ -z "$BACKEND_URL" ]; then echo "BACKEND_URL secret is not set"; exit 1; fi
+          for i in 1 2 3; do
+            if curl -fsS --max-time 90 "$BACKEND_URL/health"; then echo; echo "awake"; exit 0; fi
+            echo "try $i failed, waiting 20 s"; sleep 20
+          done
+          echo "backend did not answer"; exit 1
