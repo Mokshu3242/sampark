@@ -1,6 +1,8 @@
 import re
 
 DEVANAGARI = str.maketrans("०१२३४५६७८९", "0123456789")
+# "1 078" with a space, thin space or no-break space between digit groups -> "1078"
+SPACED_THOUSANDS = re.compile(r"(?<=\d)[ \u00a0\u202f\u2009](?=\d{3}(?!\d))")
 # A number not glued to a letter or dot on its left: "34", "4,308", "8.79", "-2.05"
 NUM_RE = re.compile(r"(?<![\w.])-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|(?<![\w.])-?\d+(?:\.\d+)?")
 # Fields that are metadata, not facts a rescuer would quote
@@ -13,7 +15,8 @@ COUNTED_LISTS = {"villages", "packages", "villages_reconnected", "top_damaged_vi
 
 
 def normalize(text: str) -> str:
-    return text.translate(DEVANAGARI)
+    """Devanagari digits -> ASCII, and '1 078' -> '1078' so split thousands read as one number."""
+    return SPACED_THOUSANDS.sub("", text.translate(DEVANAGARI))
 
 
 def extract_numbers(text: str) -> list[float]:
@@ -45,9 +48,10 @@ def build_pool(obj, path: str = "", out: list | None = None) -> list[tuple[float
         out.append((float(obj), path))
     elif isinstance(obj, str):
         if path.endswith(("date", "_date")):        # "2026-08-16" -> allow 2026, 8, 16 from dates only
-            for n in extract_numbers(obj.replace("-", " ")):
+            for n in extract_numbers(obj.replace("-", "/")):
                 out.append((n, path))
     return out
+
 
 def _match(n: float, pool: list[tuple[float, str]]) -> str | None:
     for p, src in pool:

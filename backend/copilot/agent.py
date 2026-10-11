@@ -7,7 +7,7 @@ from app.core.llm import LLM, LLMError, get_llm
 from copilot.prompts import SYSTEM_EN
 from copilot.tools import TOOL_NAMES, ToolBox, ToolError
 from copilot.translate import to_english, to_nepali
-from copilot.verify import check_answer
+from copilot.verify import check_answer, extract_numbers
 
 log = logging.getLogger("flood-watch.agent")
 
@@ -30,6 +30,11 @@ def _parse(raw: str) -> dict:
     if not isinstance(obj, dict):
         raise ValueError("JSON is not an object")
     return obj
+
+
+def _looks_like_json(raw: str) -> bool:
+    t = raw.strip()
+    return t.startswith("{") or t.startswith("```")
 
 
 def _clean_tool_name(name) -> str:
@@ -59,7 +64,7 @@ def _normalize(obj: dict) -> dict:
     if isinstance(obj.get("tool_calls"), list) and obj["tool_calls"]:
         first = obj["tool_calls"][0]
         if isinstance(first, dict):
-            obj = first.get("function", first) if isinstance(first.get("function"), dict) else first
+            obj = first["function"] if isinstance(first.get("function"), dict) else first
 
     for k in TOOL_KEYS:
         v = obj.get(k)
@@ -69,8 +74,8 @@ def _normalize(obj: dict) -> dict:
                 args = next((v[a] for a in ARG_KEYS if a in v), {})
                 return {"tool": name, "args": _as_args(args)}
         elif isinstance(v, str) and v.strip():
-            if k != "tool" and v.strip() not in TOOL_NAMES and _clean_tool_name(v) not in TOOL_NAMES:
-                continue                                       # "name"/"text" that is not a tool
+            if k != "tool" and _clean_tool_name(v) not in TOOL_NAMES:
+                continue                                       # a "name" field that is not a tool
             args = next((obj[a] for a in ARG_KEYS if a in obj), {})
             return {"tool": v, "args": _as_args(args)}
 
@@ -120,6 +125,7 @@ def _answer_en(question: str, run_dir: Path, llm: LLM, history: list[dict]) -> d
     box = ToolBox(run_dir)
     past = [{"role": h["role"], "content": str(h["content"])[:500]}
             for h in history[-6:] if h.get("role") in ("user", "assistant")]
+    is_follow_up = bool(past)
     messages = [{"role": "system", "content": SYSTEM_EN}, *past, {"role": "user", "content": question}]
     tool_outputs, trace = [], []
     retries, bad_tools, bad_shapes = 0, 0, 0
@@ -136,6 +142,11 @@ def _answer_en(question: str, run_dir: Path, llm: LLM, history: list[dict]) -> d
             obj = _normalize(_parse(raw))
         except Exception:
             obj = {}
+
+        # Plain text after a tool ran: treat it as the answer (numbers still get checked)
+        if not obj and tool_outputs and raw.strip() and not _looks_like_json(raw):
+            log.info(f"Turn {turn + 1}: plain-text answer accepted")
+            obj = {"answer": raw.strip()}
 
         # ---- Not usable ----
         if not obj:
@@ -179,6 +190,11 @@ def _answer_en(question: str, run_dir: Path, llm: LLM, history: list[dict]) -> d
         # ---- Final answer ----
         answer = str(obj["answer"]).strip()
         if not tool_outputs:
+            # A follow-up with no numbers can be answered from the conversation
+            if is_follow_up and not extract_numbers(answer):
+                log.info(f"Turn {turn + 1}: follow-up answered from context (no numbers)")
+                return _result(answer, tool_outputs, trace, llm.last_provider,
+                               {"ok": True, "unverified": [], "sources": []}, verified=True)
             bad_shapes += 1
             log.info(f"Turn {turn + 1}: answered without a tool ({bad_shapes}/{MAX_BAD_SHAPES}): {answer[:150]}")
             if bad_shapes >= MAX_BAD_SHAPES:

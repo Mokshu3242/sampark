@@ -9,7 +9,7 @@ from app.core.config import settings
 log = logging.getLogger("flood-watch.llm")
 
 # Errors where retrying the same provider won't help
-PERMANENT_HINTS = ("daily", "quota", "404", "403", "not_found", "suspended", "empty answer",
+PERMANENT_HINTS = ("daily", "quota", "404", "403", "not_found", "suspended",
                    "tool_use_failed", "json_validate_failed")
 
 
