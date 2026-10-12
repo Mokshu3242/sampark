@@ -87,7 +87,7 @@ Compared with a plain 3 dB change baseline, Sampark flags **25 to 43 times less 
 Moderate damage (EMS "damaged" and "possibly damaged") is mostly invisible to 20 m radar change.
 
 <p align="center">
-  <img src="docs/figures/20261008T063513-021f3e_error_map.png" alt="Error map against EMSR927 for the main run" width="80%">
+  <img src="docs/figures/20261008T230310-8ae6e4_error_map.png" alt="Error map against EMSR927 for the main run" width="80%">
 </p>
 
 ## Architecture
