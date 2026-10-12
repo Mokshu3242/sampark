@@ -244,7 +244,7 @@ def stored_runs() -> list[str]:
     try:
         fs = _mongo()
         if fs is not None:
-            ids += [g.filename for g in fs.find({}, {"filename": 1})]
+            ids += [g.filename for g in fs.find()]
     except Exception as e:
         log.warning(f"Mongo list failed: {e}")
     try:
