@@ -1,8 +1,10 @@
 """Keep finished runs off the server's disk (free hosts wipe it).
 Each run = one zip. Saved to MongoDB GridFS and Backblaze B2; either can be left unset."""
+import gc
 import io
 import logging
 import os
+import shutil
 import time
 import zipfile
 from urllib.parse import quote_plus
@@ -75,14 +77,62 @@ def _zip_run(run_id: str) -> bytes:
     return buf.getvalue()
 
 
-def _unzip_run(run_id: str, data: bytes) -> None:
+def _unzip_run(run_id: str, data) -> None:
+    """data is bytes or a path to a zip on disk. A path keeps memory low."""
     run_dir = settings.runs_dir / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(io.BytesIO(data)) as z:
+    src = data if isinstance(data, (str, os.PathLike)) else io.BytesIO(data)
+    with zipfile.ZipFile(src) as z:
         z.extractall(run_dir)
         for info in z.infolist():                 # keep file times (road caches compare them)
             t = time.mktime(info.date_time + (0, 0, -1))
             os.utime(run_dir / info.filename, (t, t))
+
+
+def _tmp_zip(run_id: str):
+    settings.runs_dir.mkdir(parents=True, exist_ok=True)
+    return settings.runs_dir / f".dl_{run_id}.zip"
+
+
+def _download_to_disk(run_id: str):
+    """Stream a run zip to a temp file in 1 MB pieces. Never holds the whole zip in memory.
+    Returns (path, source) or (None, None)."""
+    tmp = _tmp_zip(run_id)
+    try:
+        fs = _mongo()
+        if fs is not None:
+            g = fs.find_one({"filename": run_id})
+            if g is not None:
+                with open(tmp, "wb") as f:
+                    shutil.copyfileobj(g, f, 1024 * 1024)
+                return tmp, "Mongo"
+    except Exception as e:
+        log.warning(f"Mongo read failed for {run_id}: {e}")
+        tmp.unlink(missing_ok=True)
+    try:
+        s3 = _b2()
+        if s3 is not None:
+            with open(tmp, "wb") as f:
+                s3.download_fileobj(settings.b2_bucket, f"{B2_PREFIX}{run_id}.zip", f)
+            return tmp, "B2"
+    except Exception as e:
+        log.warning(f"B2 read failed for {run_id}: {e}")
+        tmp.unlink(missing_ok=True)
+    return None, None
+
+
+def _restore_from_disk(run_id: str) -> bool:
+    tmp, source = _download_to_disk(run_id)
+    if tmp is None:
+        return False
+    try:
+        size = tmp.stat().st_size
+        _unzip_run(run_id, tmp)
+        log.info(f"Restored {run_id} from {source} ({size / 1e6:.0f} MB)")
+        return True
+    finally:
+        tmp.unlink(missing_ok=True)
+        gc.collect()
 
 
 def _on_disk(run_id: str) -> bool:
@@ -185,47 +235,41 @@ def has_run(run_id: str) -> bool:
 
 def restore_run(run_id: str) -> bool:
     """Pull one run from storage onto disk (overwrites what is there). Mongo first, then B2."""
-    data = None
+    return _restore_from_disk(run_id)
+
+
+def stored_runs() -> list[str]:
+    """Run IDs in any store, without downloading them."""
+    ids = []
     try:
         fs = _mongo()
         if fs is not None:
-            g = fs.find_one({"filename": run_id})
-            if g is not None:
-                data = g.read()
+            ids += [g.filename for g in fs.find({}, {"filename": 1})]
     except Exception as e:
-        log.warning(f"Mongo read failed for {run_id}: {e}")
-    if data is None:
-        data = _b2_get(run_id)
-    if data is None:
-        return False
-    _unzip_run(run_id, data)
-    log.info(f"Pulled finished run {run_id} ({len(data) / 1e6:.0f} MB)")
-    return True
+        log.warning(f"Mongo list failed: {e}")
+    try:
+        ids += _b2_list()
+    except Exception as e:
+        log.warning(f"B2 list failed: {e}")
+    return list(dict.fromkeys(ids))            # keep order, drop duplicates
 
 
 def restore_all() -> int:
-    """On startup: bring back every stored run that is not on disk. Mongo first, then B2."""
+    """On startup: bring back every stored run that is not on disk, one at a time,
+    streamed through a temp file. Pinned demo runs come first."""
+    from app.core.memtrim import trim
+    ids = stored_runs()
+    ids.sort(key=lambda r: (r not in PINNED, r))
     n = 0
-    try:
-        fs = _mongo()
-        if fs is not None:
-            for g in fs.find():
-                if not _on_disk(g.filename):
-                    _unzip_run(g.filename, g.read())
-                    n += 1
-                    log.info(f"Restored {g.filename} from Mongo")
-    except Exception as e:
-        log.warning(f"Mongo restore failed: {e}")
-    try:
-        s3 = _b2()
-        for run_id in _b2_list():
-            if not _on_disk(run_id):
-                obj = s3.get_object(Bucket=settings.b2_bucket, Key=f"{B2_PREFIX}{run_id}.zip")
-                _unzip_run(run_id, obj["Body"].read())
+    for run_id in ids:
+        if _on_disk(run_id):
+            continue
+        try:
+            if _restore_from_disk(run_id):
                 n += 1
-                log.info(f"Restored {run_id} from B2")
-    except Exception as e:
-        log.warning(f"B2 restore failed: {e}")
+        except Exception as e:
+            log.warning(f"Restore failed for {run_id}: {e}")
+        trim(f"restore {run_id}")
     return n
 
 

@@ -14,8 +14,9 @@ def _stopped(registry: RunRegistry, run_id: str, where: str) -> dict:
     return {"cancelled_at": where}
 
 
-def _build_caches(run_id: str) -> None:
-    """Pre-make everything the web app would otherwise build on first view."""
+def build_caches(run_id: str) -> None:
+    """Pre-make everything the web app would otherwise build on first view.
+    Runs on the GitHub worker, so the 512 MB server only sends finished files."""
     run_dir = settings.runs_dir / run_id
     try:
         from pipeline.hydrology import damaged_roads_path
@@ -35,6 +36,11 @@ def _build_caches(run_id: str) -> None:
                     cached_image(run_id, name, w)
     except Exception as e:
         log.warning(f"Image cache not built: {e}")
+    try:
+        from pipeline.prebuild import build_all
+        build_all(run_id, run_dir)              # reports, story flow, chip colours
+    except Exception as e:
+        log.warning(f"Prebuild not done: {e}")
 
 
 def run_pipeline(run_id: str, bbox: list[float], flood_date: date, window_days: int = 30) -> dict:
@@ -93,7 +99,7 @@ def _run_pipeline(run_id: str, bbox: list[float], flood_date: date, window_days:
         hydrology.build_hydro(run_dir)
     except Exception as e:                      # bonus feature: never fail the run for it
         log.warning(f"Flow cache not built: {e}")
-    _build_caches(run_id)
+    build_caches(run_id)
 
     if cancel.requested(run_dir):
         return _stopped(registry, run_id, "saving")
@@ -106,3 +112,5 @@ def _run_pipeline(run_id: str, bbox: list[float], flood_date: date, window_days:
     except Exception as e:                      # never fail a finished run over storage
         log.warning(f"Could not store run {run_id}: {e}")
     return summary
+
+_build_caches = build_caches                     # old name, kept for other imports

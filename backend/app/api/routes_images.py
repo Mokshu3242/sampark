@@ -1,5 +1,6 @@
 """Serve run rasters as PNG overlays for MapLibre (uncertainty, hillshade, Sentinel-2).
 Every raster is warped to Web Mercator first, so the 4 corners line up exactly on the map."""
+import json
 import logging
 import re
 from functools import lru_cache
@@ -203,9 +204,13 @@ def get_image_bounds(run_id: str, name: str, width: int = Query(1400, ge=200, le
     return {"coordinates": _corners(mb)}
 
 
-@lru_cache(maxsize=16)
-def _global_stretch(path_str: str, size: int, bands: tuple, stretch: tuple) -> tuple[float, float]:
-    """One colour stretch for the whole image, so every chip matches the big overlay."""
+def stretch_file(path: Path, name: str) -> Path:
+    return path.parent / f"stretch_{name}_s{path.stat().st_size}.json"
+
+
+def _compute_stretch(path_str: str, bands: tuple, stretch: tuple) -> tuple[float, float]:
+    """One colour stretch for the whole image, so every chip matches the big overlay.
+    Reads a 1/4 size copy. The worker saves the result, so the server rarely runs this."""
     with rasterio.open(path_str) as ds:
         arr = ds.read(list(bands), out_shape=(len(bands), max(1, ds.height // 4), max(1, ds.width // 4))).astype("float32")
         nod = ds.nodata
@@ -216,6 +221,25 @@ def _global_stretch(path_str: str, size: int, bands: tuple, stretch: tuple) -> t
         return 0.0, 1.0
     lo, hi = np.percentile(arr[:, valid], stretch)
     return float(lo), float(hi if hi > lo else lo + 1)
+
+
+@lru_cache(maxsize=16)
+def _global_stretch(path_str: str, size: int, name: str, bands: tuple, stretch: tuple) -> tuple[float, float]:
+    path = Path(path_str)
+    f = stretch_file(path, name)
+    if f.exists():                                  # built by the worker
+        lo, hi = json.loads(f.read_text(encoding="utf-8"))
+        return float(lo), float(hi)
+    with HEAVY:
+        try:
+            lo, hi = _compute_stretch(path_str, bands, stretch)
+        finally:
+            trim("chip stretch")
+    try:
+        f.write_text(json.dumps([lo, hi]), encoding="utf-8")
+    except Exception:
+        pass
+    return lo, hi
 
 
 @router.get("/{run_id}/chip/{name}.png")
@@ -238,7 +262,7 @@ def get_chip(run_id: str, name: str, lon: float, lat: float,
     valid = np.all(arr != 0, axis=0)
     if nod is not None:
         valid &= np.all(arr != nod, axis=0)
-    lo, hi = _global_stretch(str(path), path.stat().st_size, tuple(bands), tuple(spec["stretch"]))
+    lo, hi = _global_stretch(str(path), path.stat().st_size, name, tuple(bands), tuple(spec["stretch"]))
     rgb = np.clip((arr - lo) / (hi - lo), 0, 1) ** spec["gamma"]
     out = np.zeros((px, px, 4), dtype=np.uint8)
     out[..., :3] = (rgb.transpose(1, 2, 0) * 255).astype(np.uint8)

@@ -34,13 +34,12 @@ RESTORE = {"done": not storage.enabled(), "runs": 0, "error": None}
 
 
 def _restore():
+    """Bring runs back after a restart. Each zip is streamed through a temp file and
+    unpacked one at a time, so memory stays low. Flow layers are NOT warmed here any
+    more: the first flow trace loads them, which keeps startup light on 512 MB."""
     try:
         settings.runs_dir.mkdir(parents=True, exist_ok=True)
         RESTORE["runs"] = storage.restore_all()
-        from pipeline.hydrology import warm_cache
-        for d in settings.runs_dir.iterdir():
-            if d.is_dir():
-                warm_cache(d)
     except Exception as e:                       # never stop the server over storage
         log.exception("Restoring runs failed")
         RESTORE["error"] = str(e)[:200]

@@ -6,7 +6,7 @@ from io import BytesIO
 
 import geopandas as gpd
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 
 from app.core import remote, storage
@@ -16,13 +16,14 @@ from app.core.heavy import HEAVY
 from app.core.run_registry import RunRegistry
 from app.schemas.run import RunRequest
 from copilot.agent import ask as copilot_ask
-from copilot.report import generate as generate_report
+from copilot.report import generate as generate_report, report_path
 from pipeline import cancel
 from pipeline.fetch import fetch_all
 from pipeline.hydrology import corridor_events, trace as trace_flow, villages_along
 from pipeline.map_cutoff import map_cutoff
 from pipeline.map_damage import map_damage
 from pipeline.map_flood import map_flood
+from pipeline.prebuild import cached_flow
 from pipeline.run_all import run_pipeline
 
 router = APIRouter(prefix="/runs", tags=["runs"])
@@ -242,10 +243,17 @@ def report(run_id: str, lang: str = "en"):
         raise HTTPException(400, "lang must be en or ne")
     if not registry.is_ready(run_id):
         raise HTTPException(409, "run not finished yet")
-    out = generate_report(run_id, run_dir, lang)
-    if out["pdf"]:
-        return FileResponse(str(out["pdf"]), media_type="application/pdf")
-    return HTMLResponse(out["html"].read_text(encoding="utf-8"))   # opens in the tab
+    path = report_path(run_dir, lang)
+    if not path.exists():
+        # Old run without a ready-made report: build it once, one at a time, then keep it.
+        from app.core.memtrim import trim
+        with HEAVY:
+            try:
+                if not path.exists():
+                    generate_report(run_id, run_dir, lang)
+            finally:
+                trim("report")
+    return FileResponse(str(path), media_type="text/html; charset=utf-8")   # opens in the tab
 
 
 # ---------- Export ----------
@@ -284,6 +292,9 @@ def flowpath(run_id: str, body: FlowRequest):
     run_dir = _run_dir(run_id)
     if not (1 <= body.snap_px <= 50):
         raise HTTPException(400, "snap_px must be 1 to 50")
+    hit = cached_flow(run_dir, body.lon, body.lat, body.buffer_m, body.snap_px)
+    if hit is not None:                                # story mode's trace, made by the worker
+        return hit
     with HEAVY:
         try:
             try:

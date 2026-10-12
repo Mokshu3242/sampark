@@ -87,7 +87,7 @@ LABELS = {
         cutoff="सडक पहुँच", cut_off="सम्पर्कविहीन गाउँ", longer_route="लामो बाटो मात्र",
         pre_isolated="बाढी अघि पनि सवारी सडक नभएको", damage="क्षति",
         buildings_affected="प्रभावित हुन सक्ने भवन", roads_cut="अवरुद्ध सडक खण्ड",
-           badge={"good": "राम्रो", "fair": "ठीकै", "poor": "कमजोर"},
+        badge={"good": "राम्रो", "fair": "ठीकै", "poor": "कमजोर"},
         bridges_lost="क्षतिग्रस्त हुन सक्ने पुल", facilities="प्रभावित स्वास्थ्य वा विद्यालय",
         debris="मलबा / कटान क्षेत्र", flood="बाढीको पानी", repair="मर्मत प्राथमिकता",
         near="नजिक", road="सडक", top_villages="ठूला सम्पर्कविहीन गाउँ", village="गाउँ",
@@ -96,34 +96,62 @@ LABELS = {
         prototype="शैक्षिक प्रोटोटाइप। सञ्चालनका लागि होइन।"),
 }
 
+LANGS = ("en", "ne")
 
-def generate(run_id: str, run_dir: Path, language: str = "en") -> dict:
-    """Always writes HTML. Also writes PDF if WeasyPrint is installed (Docker). Numbers come from files, not the LLM."""
-    load = lambda n: json.loads((run_dir / n).read_text(encoding="utf-8"))
-    cutoff = load("cutoff_stats.json")
+
+def report_path(run_dir: Path, language: str) -> Path:
+    return run_dir / f"report_{language}.html"
+
+
+def _map_b64(run_dir: Path) -> str | None:
+    """The map is the heavy part. Draw it once and keep the PNG next to the run."""
+    cached = run_dir / "report_map.png"
     try:
-        map_b64 = base64.b64encode(report_map.render(run_dir).read_bytes()).decode()
+        if not cached.exists():
+            src = report_map.render(run_dir)
+            if Path(src) != cached:
+                cached.write_bytes(Path(src).read_bytes())
+        return base64.b64encode(cached.read_bytes()).decode()
     except Exception as e:
         log.warning(f"Map render failed: {e}")
-        map_b64 = None
+        return None
+
+
+def generate(run_id: str, run_dir: Path, language: str = "en", pdf: bool = False) -> dict:
+    """Writes report_<lang>.html. Numbers come from files, not the LLM.
+    PDF is off by default: WeasyPrint needs a lot of memory, and browsers print HTML to PDF fine."""
+    load = lambda n: json.loads((run_dir / n).read_text(encoding="utf-8"))
+    cutoff = load("cutoff_stats.json")
 
     html = Template(TEMPLATE).render(
         t=LABELS[language], req=load("request.json"), q=load("quality.json"),
         f=load("flood_stats.json"), d=load("damage_stats.json"), c=cutoff,
         plan=cutoff.get("repair_plan", []),
         villages=[r for r in cutoff.get("ranked", []) if r["status"] == "cut_off"][:6],
-        map_b64=map_b64, attribution=ATTRIBUTION,
+        map_b64=_map_b64(run_dir), attribution=ATTRIBUTION,
         generated=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
     )
-    html_path = run_dir / f"report_{language}.html"
+    html_path = report_path(run_dir, language)
     html_path.write_text(html, encoding="utf-8")
     out = {"html": html_path, "pdf": None}
 
-    try:
-        from weasyprint import HTML  # only available in Docker
-        pdf_path = run_dir / f"report_{language}.pdf"
-        HTML(string=html).write_pdf(pdf_path)
-        out["pdf"] = pdf_path
-    except Exception as e:
-        log.info(f"PDF skipped ({type(e).__name__}). HTML report is ready; print it to PDF from a browser.")
+    if pdf:
+        try:
+            from weasyprint import HTML
+            pdf_path = run_dir / f"report_{language}.pdf"
+            HTML(string=html).write_pdf(pdf_path)
+            out["pdf"] = pdf_path
+        except Exception as e:
+            log.info(f"PDF skipped ({type(e).__name__}).")
     return out
+
+
+def build_all(run_id: str, run_dir: Path) -> list[Path]:
+    """Worker side: make both reports ahead of time, so the server only sends a file."""
+    made = []
+    for lang in LANGS:
+        try:
+            made.append(generate(run_id, run_dir, lang)["html"])
+        except Exception as e:
+            log.warning(f"Report {lang} not built: {e}")
+    return made
