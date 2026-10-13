@@ -13,7 +13,7 @@ It was built for Track B of the Multimodal AI Hackathon 2026. The case study is 
 > **Educational prototype.** Not an operational tool. All results are satellite estimates and are not checked on the ground.
 
 - **Live demo:** https://sampark-flood.vercel.app
-- **Demo video:** _add link_
+- **Demo video:** https://www.youtube.com/watch?v=tDA63hQSNdw
 - **Access key:** browsing is open. To start a new run or use the copilot, click **Unlock** at the bottom of the left panel and enter `Access123`.
 
 ---
@@ -153,7 +153,7 @@ Locally, runs execute on your own machine. A full run takes about 15 minutes, mo
 ```bash
 cd backend
 python -m scripts.eval_emsr describe                    # list the EMS layers found
-python -m scripts.eval_emsr 20261008T063513-021f3e      # score one run
+python -m scripts.eval_emsr <run_id>      # score one run
 python -m scripts.diagnose_gorge                        # per-area diagnostic of the gorge misses
 ```
 
@@ -213,6 +213,7 @@ The basemap is © OpenFreeMap, © OpenMapTiles, with data from OpenStreetMap.
 **While building**
 - **Claude (Anthropic)**, as a coding assistant. I wrote each phase and pasted drafts, logs and errors. Claude reviewed the code, found bugs, and suggested fixes and full rewritten files. It helped most with the deployment (Render, GitHub Actions worker, MongoDB and B2 storage), memory and speed fixes for the free server, the copilot's number checker, and the README. All design decisions, testing and running were done by me.
 - **ChatGPT (OpenAI image generation)**, for the logo and the README banner.
+- **Narration:** Google Text-to-Speech
 
 **Inside the app**
 - **Groq `openai/gpt-oss-120b`** is the copilot's main model. **Cloudflare Workers AI (Llama 3.3 70B)** and **Google Gemini 2.5 Flash** are fallbacks.
