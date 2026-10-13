@@ -184,17 +184,389 @@ async def _edge(text: str, path: Path, voice: str) -> None:
     await edge_tts.Communicate(text, voice, rate=RATE).save(str(path))
 
 
-def _gtts(text: str, path: Path, voice: str) -> None:
+def _gtts(text: str, path: Path, voice: str, male: bool = False) -> None:
     from gtts import gTTS
     lang = "ne" if voice.lower().startswith("ne") else "en"
     tmp = path.with_suffix(".g.mp3")
     gTTS(text, lang=lang, tld="co.in").save(str(tmp))       # co.in = Indian English accent
     # gTTS speaks a little slowly; speed it up a touch so it flows.
-    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(tmp), "-filter:a", "atempo=1.12", str(path)], check=True)
+    # For a male voice, lower the pitch and the voice "size" together (rubberband).
+    filt = "rubberband=pitch=0.78:formant=shifted,atempo=1.12" if male else "atempo=1.12"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(tmp), "-filter:a", filt, str(path)], check=True)
     tmp.unlink(missing_ok=True)
 
 
+SAPI_PS = r"""
+Add-Type -AssemblyName System.Speech
+$s = New-Object System.Speech.Synthesis.SpeechSynthesizer
+$v = $s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo } |
+     Where-Object { $_.Culture.Name -eq 'en-IN' -and $_.Gender -eq 'Male' } | Select-Object -First 1
+if (-not $v) { Write-Error 'NO_EN_IN_MALE'; exit 3 }
+$s.SelectVoice($v.Name)
+$s.Rate = [int]$env:SAMPARK_RATE
+$s.SetOutputToWaveFile($env:SAMPARK_OUT)
+$s.Speak($env:SAMPARK_TEXT)
+$s.Dispose()
+"""
+
+
+def _sapi(text: str, path: Path) -> None:
+    """Windows' own Indian English male voice (Microsoft Ravi). Offline."""
+    wav = path.with_suffix(".s.wav")
+    env = dict(os.environ, SAMPARK_TEXT=text, SAMPARK_OUT=str(wav), SAMPARK_RATE="0")
+    r = subprocess.run(["powershell", "-NoProfile", "-Command", SAPI_PS], env=env, capture_output=True, text=True)
+    if r.returncode != 0 or not wav.exists():
+        if "NO_EN_IN_MALE" in (r.stderr or ""):
+            raise SystemExit(
+                "\nWindows has no Indian English male voice installed.\n"
+                "Add it: Settings > Time & language > Language & region > Add a language >\n"
+                "English (India), tick 'Speech'. Then run again. Or use --engine gtts-male.")
+        raise RuntimeError(r.stderr.strip()[:300])
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(wav), str(path)], check=True)
+    wav.unlink(missing_ok=True)
+
+
+PIPER_VOICE = os.environ.get("PIPER_VOICE", "en_US-ryan-high")   # male. Also: en_GB-alan-medium
+_piper = {}
+
+
+def _piper_model() -> Path:
+    """Download the offline voice once (about 60 MB) into video_out/piper."""
+    import urllib.request
+    name = PIPER_VOICE
+    lang, who, quality = name.split("-")
+    base = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/{lang.split('_')[0]}/{lang}/{who}/{quality}/{name}"
+    d = OUT / "piper"
+    d.mkdir(parents=True, exist_ok=True)
+    for ext in (".onnx", ".onnx.json"):
+        f = d / f"{name}{ext}"
+        if not f.exists():
+            print(f"  downloading offline voice {f.name} (once)...")
+            urllib.request.urlretrieve(base + ext + "?download=true", f)
+    return d / f"{name}.onnx"
+
+
+def _piper_say(text: str, path: Path) -> None:
+    import wave
+    from piper import PiperVoice
+    if "v" not in _piper:
+        _piper["v"] = PiperVoice.load(str(_piper_model()))
+    wav = path.with_suffix(".p.wav")
+    with wave.open(str(wav), "wb") as wf:
+        _piper["v"].synthesize_wav(text, wf)
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(wav), str(path)], check=True)
+    wav.unlink(missing_ok=True)
+
+
+def _eleven(text: str, path: Path) -> None:
+    """ElevenLabs. Key and voice come from env vars only, never from the code."""
+    import urllib.error
+    import urllib.request
+    key = os.environ.get("ELEVENLABS_API_KEY", "").strip()
+    vid = os.environ.get("ELEVEN_VOICE_ID", "").strip()
+    if not key or not vid:
+        raise SystemExit("Set ELEVENLABS_API_KEY and ELEVEN_VOICE_ID first (see the instructions).")
+    body = json.dumps({
+        "text": text,
+        "model_id": os.environ.get("ELEVEN_MODEL", "eleven_multilingual_v2"),
+        "voice_settings": {"stability": 0.5, "similarity_boost": 0.75, "style": 0.15, "use_speaker_boost": True},
+    }).encode()
+    req = urllib.request.Request(
+        f"https://api.elevenlabs.io/v1/text-to-speech/{vid}?output_format=mp3_44100_128",
+        data=body, method="POST",
+        headers={"xi-api-key": key, "Content-Type": "application/json", "Accept": "audio/mpeg"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            path.write_bytes(r.read())
+    except urllib.error.HTTPError as e:
+        msg = e.read().decode("utf-8", "replace")[:300]
+        if e.code == 402:
+            raise SystemExit(
+                "\nElevenLabs: this voice needs a paid plan for the API.\n"
+                "Free plan: make your own voice with Voice Design (it is yours, so the API allows it),\n"
+                "or pick one of the default voices. Then set ELEVEN_VOICE_ID to that voice.")
+        if e.code in (401, 403):
+            raise SystemExit(f"ElevenLabs refused the key or voice ({e.code}): {msg}")
+        if e.code == 429 or "quota" in msg.lower():
+            raise SystemExit(f"ElevenLabs credits used up or too many requests: {msg}")
+        raise RuntimeError(f"ElevenLabs {e.code}: {msg}")
+
+
+# ---------- your own voice ----------
+MYVOICE = OUT / "myvoice"
+CLEAN = ("silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.1,"
+         "areverse,silenceremove=start_periods=1:start_threshold=-45dB:start_silence=0.15,areverse,"
+         "highpass=f=80,afftdn=nf=-25")
+
+
+def own_key(text: str) -> str:
+    return hashlib.sha1(text.strip().encode("utf-8")).hexdigest()[:12]
+
+
+def _own(text: str, path: Path, voice: str) -> None:
+    src = MYVOICE / f"{own_key(text)}.wav"
+    if src.exists():
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(src), "-af", CLEAN, str(path)], check=True)
+        return
+    print(f"  (no recording for: {text[:50]}... using Google Indian voice made deeper)")
+    _gtts(text, path, voice, male=True)
+
+
+def all_lines() -> list[tuple[str, str]]:
+    """Every sentence the video speaks: (label, spoken text). Story lines come
+    from the last recording (take.json), because the app makes them."""
+    rows = []
+    for sid, text in SCENES:
+        for k, sent in enumerate(sentences(text)):
+            rows.append((f"scene {sid}, line {k + 1}", spoken(sent)))
+    take = OUT / "take.json"
+    if take.exists():
+        for n, (_, _, text, _) in enumerate(json.loads(take.read_text(encoding="utf-8"))["story"]):
+            rows.append((f"story, line {n + 1}", spoken(text)))
+    return rows
+
+
+def record_voice(redo: bool = False) -> None:
+    """A simple teleprompter. Shows each sentence; you read it into the mic."""
+    try:
+        import numpy as np
+        import sounddevice as sd
+    except ImportError:
+        sys.exit("Recording needs one package. Run:  pip install sounddevice")
+    import wave
+    MYVOICE.mkdir(parents=True, exist_ok=True)
+    rows = all_lines()
+    todo = [r for r in rows if redo or not (MYVOICE / f"{own_key(r[1])}.wav").exists()]
+    print(f"\n{len(rows)} sentences in the video, {len(todo)} to record.")
+    if not (OUT / "take.json").exists():
+        print("Note: story lines are not listed yet. Make one video first, then run this again to add them.")
+    print("Tips: quiet room, mic 15 cm away, speak calmly. Enter = start, Enter = stop.\n")
+    sr = 48000
+    for n, (label, text) in enumerate(todo, 1):
+        while True:
+            print("=" * 70)
+            print(f"[{n}/{len(todo)}]  {label}\n\n    {text}\n")
+            cmd = input("Enter = record,  s = skip,  q = quit: ").strip().lower()
+            if cmd == "q":
+                return
+            if cmd == "s":
+                break
+            frames = []
+            stream = sd.InputStream(samplerate=sr, channels=1, dtype="int16",
+                                    callback=lambda data, *_: frames.append(data.copy()))
+            with stream:
+                input("  ● recording... press Enter when done ")
+            audio = np.concatenate(frames) if frames else np.zeros((1, 1), "int16")
+            secs = len(audio) / sr
+            print(f"  recorded {secs:.1f} s, playing back...")
+            sd.play(audio, sr)
+            sd.wait()
+            ok = input("  Enter = keep,  r = redo: ").strip().lower()
+            if ok == "r":
+                continue
+            with wave.open(str(MYVOICE / f"{own_key(text)}.wav"), "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(sr)
+                wf.writeframes(audio.tobytes())
+            break
+    print("\nAll done. Now make the video with:  --engine own")
+
+
+def export_script() -> Path:
+    """Write every line to read, numbered, as one text file."""
+    rows = all_lines()
+    out = OUT / "voice_script.txt"
+    lines = ["SAMPARK VOICE SCRIPT", "",
+             "Read each line, then stay quiet for about 2 seconds before the next one.",
+             "Made a mistake? Pause 2 seconds and read the same line again. The last try is kept.",
+             "Do not read the numbers or the [labels].", ""]
+    last = None
+    for n, (label, text) in enumerate(rows, 1):
+        head = label.split(",")[0]
+        if head != last:
+            lines += ["", f"[{head.upper()}]"]
+            last = head
+        lines.append(f"{n:3d}.  {text}")
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out
+
+
+def _norm(t: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ", t.lower()).split())
+
+
+def import_voice(src: Path, model_size: str = "small.en") -> None:
+    """Cut one long recording into sentences and match each piece to the script.
+    Uses the pauses to cut, and Whisper (offline) to know which line each piece is."""
+    try:
+        from faster_whisper import WhisperModel
+    except ImportError:
+        sys.exit("Importing a long recording needs one package. Run:  pip install faster-whisper")
+    from difflib import SequenceMatcher
+    if not src.exists():
+        sys.exit(f"File not found: {src}")
+    MYVOICE.mkdir(parents=True, exist_ok=True)
+    rows = all_lines()
+    texts = [t for _, t in rows]
+
+    # 1) find speech pieces between pauses
+    r = subprocess.run(["ffmpeg", "-hide_banner", "-i", str(src), "-af",
+                        "highpass=f=80,silencedetect=noise=-38dB:d=0.7", "-f", "null", "-"],
+                       capture_output=True, text=True)
+    starts = [float(x) for x in re.findall(r"silence_end: ([\d.]+)", r.stderr)]
+    ends = [float(x) for x in re.findall(r"silence_start: ([\d.]+)", r.stderr)]
+    total = duration(src)
+    if not ends or ends[0] > 0.05:
+        starts = [0.0] + starts
+    ends = ends + [total]
+    pieces = []
+    for a in starts:
+        b = next((e for e in ends if e > a + 0.3), None)
+        if b is not None and b - a > 0.4:
+            pieces.append((max(0, a - 0.08), b + 0.12))
+    print(f"Found {len(pieces)} spoken pieces in {total / 60:.1f} min of audio.")
+
+    # 2) know what each piece says
+    print(f"Loading the speech model ({model_size}, downloads once)...")
+    model = WhisperModel(model_size, device="cpu", compute_type="int8")
+    tmp = OUT / "audio" / "_piece.wav"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    heard = []
+    for a, b in pieces:
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{a:.3f}", "-to", f"{b:.3f}", "-i", str(src),
+                        "-ac", "1", "-ar", "16000", str(tmp)], check=True)
+        segs, _ = model.transcribe(str(tmp), language="en", beam_size=1, vad_filter=False)
+        heard.append(" ".join(x.text for x in segs).strip())
+
+    # 3) match pieces to script lines, in order. A retake of the same line replaces the earlier one.
+    sim = lambda x, y: SequenceMatcher(None, _norm(x), _norm(y)).ratio()
+    pos, got = 0, {}
+    for (a, b), said in zip(pieces, heard):
+        if not said:
+            continue
+        window = range(max(0, pos - 1), min(len(texts), pos + 4))
+        best = max(window, key=lambda j: sim(said, texts[j]), default=None)
+        if best is None or sim(said, texts[best]) < 0.5:
+            print(f"  ? skipped a piece I could not match: \"{said[:60]}\"")
+            continue
+        got[best] = (a, b)
+        pos = best + 1 if best >= pos else pos
+
+    # 4) save each line as its own clip
+    for j, (a, b) in got.items():
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", f"{a:.3f}", "-to", f"{b:.3f}", "-i", str(src),
+                        "-ac", "1", "-ar", "48000", str(MYVOICE / f"{own_key(texts[j])}.wav")], check=True)
+    missing = [rows[j][0] for j in range(len(texts)) if j not in got]
+    print(f"\nMatched {len(got)} of {len(texts)} lines.")
+    if missing:
+        print("Missing (these will use the Google Indian voice, or record them with --record-voice):")
+        for m in missing:
+            print(f"   - {m}")
+    print("\nNow make the video with:  --engine own")
+
+
+def _http_post(url: str, body: bytes, headers: dict) -> bytes:
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, data=body, method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as r:
+            return r.read()
+    except urllib.error.HTTPError as e:
+        msg = e.read().decode("utf-8", "replace")[:300]
+        if e.code in (401, 402, 403):
+            raise SystemExit(f"\nThe voice service refused the request ({e.code}): {msg}\n"
+                             "Check the key (and region), or your free credits.")
+        raise RuntimeError(f"{e.code}: {msg}")
+
+
+def _sarvam(text: str, path: Path, voice: str) -> None:
+    """Sarvam AI Bulbul: Indian voices made in India. Key from SARVAM_API_KEY."""
+    key = os.environ.get("SARVAM_API_KEY", "").strip()
+    if not key:
+        raise SystemExit("Set SARVAM_API_KEY first.")
+    lang = "hi-IN" if voice.lower().startswith("ne") else "en-IN"    # Hindi voice reads Nepali script well
+    body = json.dumps({
+        "text": text, "language_code": lang,
+        "model": os.environ.get("SARVAM_MODEL", "bulbul:v2"),
+        "speaker": os.environ.get("SARVAM_SPEAKER", "karun"),          # male: karun, abhilash, hitesh
+        "pace": float(os.environ.get("SARVAM_PACE", "1.0")),
+        "speech_sample_rate": 24000,
+    }).encode()
+    data = json.loads(_http_post("https://api.sarvam.ai/text-to-speech", body,
+                                 {"api-subscription-key": key, "Content-Type": "application/json"}))
+    wav = path.with_suffix(".sv.wav")
+    wav.write_bytes(base64.b64decode("".join(data["audios"])))
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(wav), str(path)], check=True)
+    wav.unlink(missing_ok=True)
+
+
+def _azure(text: str, path: Path, voice: str) -> None:
+    """Azure Speech: the same Prabhat voice as before, through the official free tier.
+    Key from AZURE_SPEECH_KEY, region from AZURE_SPEECH_REGION (e.g. centralindia)."""
+    from xml.sax.saxutils import escape
+    key = os.environ.get("AZURE_SPEECH_KEY", "").strip()
+    region = os.environ.get("AZURE_SPEECH_REGION", "").strip()
+    if not key or not region:
+        raise SystemExit("Set AZURE_SPEECH_KEY and AZURE_SPEECH_REGION first.")
+    name = STORY_VOICE_NE if voice.lower().startswith("ne") else os.environ.get("AZURE_VOICE", "en-IN-PrabhatNeural")
+    lang = "ne-NP" if name.startswith("ne") else "en-IN"
+    ssml = (f"<speak version='1.0' xml:lang='{lang}'><voice name='{name}'>"
+            f"<prosody rate='{RATE}'>{escape(text)}</prosody></voice></speak>")
+    path.write_bytes(_http_post(
+        f"https://{region}.tts.speech.microsoft.com/cognitiveservices/v1", ssml.encode("utf-8"),
+        {"Ocp-Apim-Subscription-Key": key, "Content-Type": "application/ssml+xml",
+         "X-Microsoft-OutputFormat": "audio-24khz-96kbitrate-mono-mp3", "User-Agent": "sampark-demo"}))
+
+
 async def _tts(text: str, path: Path, voice: str) -> None:
+    if ENGINE in ("sarvam", "azure"):
+        fn = _sarvam if ENGINE == "sarvam" else _azure
+        for n in range(3):
+            try:
+                fn(text, path, voice)
+                return
+            except RuntimeError as e:
+                print(f"  voice service error {e}, retrying...")
+                await asyncio.sleep(5 * (n + 1))
+        raise SystemExit("The voice service keeps failing. Try again later.")
+    if ENGINE == "own":
+        _own(text, path, voice)
+        return
+    if ENGINE == "eleven":
+        if voice.lower().startswith("ne"):          # Nepali story lines: Google Nepali voice
+            _gtts(text, path, voice, male=True)
+            return
+        for n in range(3):
+            try:
+                _eleven(text, path)
+                return
+            except RuntimeError as e:
+                print(f"  {e}. Retrying...")
+                await asyncio.sleep(5 * (n + 1))
+        raise SystemExit("ElevenLabs keeps failing. Try again later.")
+    if ENGINE == "sapi":
+        if voice.lower().startswith("ne"):
+            _gtts(text, path, voice, male=True)
+        else:
+            _sapi(text, path)
+        return
+    if ENGINE == "gtts-male":
+        for n in range(4):
+            try:
+                _gtts(text, path, voice, male=True)
+                return
+            except Exception as e:
+                print(f"  google voice busy ({e.__class__.__name__}), retrying...")
+                await asyncio.sleep(5 * (n + 1))
+        raise SystemExit("Google voice failed. Check your internet and try again.")
+    if ENGINE == "piper":
+        if voice.lower().startswith("ne"):          # no Nepali offline voice: use Google for those lines
+            _gtts(text, path, voice)
+        else:
+            _piper_say(text, path)
+        return
     if ENGINE == "gtts":
         for n in range(4):
             try:
@@ -237,8 +609,17 @@ def pick_engine(voice: str) -> None:
                 return
         except Exception:
             time.sleep(4)
-    ENGINE = "gtts"
-    print("  Microsoft voice is blocked right now. Using Google voice (Indian accent).")
+    # Fallbacks, all Indian male: Windows "Ravi" first, then Google made deeper.
+    if os.name == "nt":
+        try:
+            ENGINE = "sapi"
+            _sapi("Namaste.", test)
+            print("  Microsoft online voice is blocked. Using Windows Indian male voice (Ravi).")
+            return
+        except BaseException:
+            pass
+    ENGINE = "gtts-male"
+    print("  Microsoft voice is blocked. Using Google Indian voice, made deeper (male).")
 
 
 def make_voice(scenes, voice: str):
@@ -253,7 +634,15 @@ def make_voice(scenes, voice: str):
         for k, sent in enumerate(parts):
             path = adir / f"s{sid:02d}_{k:02d}.mp3"
             tag = path.with_suffix(".hash")
-            h = hashlib.sha1(f"{ENGINE}|{voice}|{RATE}|{spoken(sent)}".encode()).hexdigest()
+            vkey = PIPER_VOICE if ENGINE == "piper" else os.environ.get("ELEVEN_VOICE_ID", "") if ENGINE == "eleven" else voice
+            if ENGINE == "sarvam":
+                vkey = os.environ.get("SARVAM_SPEAKER", "karun") + os.environ.get("SARVAM_MODEL", "bulbul:v2")
+            if ENGINE == "azure":
+                vkey = os.environ.get("AZURE_VOICE", "en-IN-PrabhatNeural")
+            if ENGINE == "own":
+                mv = MYVOICE / f"{own_key(spoken(sent))}.wav"
+                vkey = f"own{mv.stat().st_mtime if mv.exists() else 0}"
+            h = hashlib.sha1(f"{ENGINE}|{vkey}|{RATE}|{spoken(sent)}".encode()).hexdigest()
             if not (path.exists() and tag.exists() and tag.read_text() == h):
                 print(f"  voice: scene {sid}, line {k + 1}")
                 asyncio.run(_tts(spoken(sent), path, voice))
@@ -758,8 +1147,7 @@ def grab_reports_direct(page: Page, run_id: str) -> list[Path]:
                 if not pdf_to_png(body, out):
                     continue
             else:
-                pg = page.context.new_page()
-                pg.set_viewport_size({"width": 1100, "height": 1400})
+                pg = page.context.browser.new_page(viewport={"width": 1100, "height": 1400})
                 base = url.rsplit("/", 1)[0] + "/"
                 html = body.decode("utf-8", "replace")
                 if "<head" in html:
@@ -977,8 +1365,21 @@ def s13(bot):
             bot.move(b["x"] + 80, b["y"] + 40, dur=1)
             bot.p.evaluate("([x,y,w,h]) => window.__ring && window.__ring(x,y,w,h)", [b["x"], b["y"], 300, 160])
             time.sleep(5)
-    bot.slide("Checked against Copernicus EMS (EMSR927)", ERROR_MAPS,
+    bot.slide("Checked against Copernicus EMS (EMSR927)", error_maps(),
               "<p>Sampark (left) · simple 3 dB threshold (right)</p>")
+
+
+def error_maps() -> list[Path]:
+    """Sampark error map first, baseline second. Uses whatever is in docs/figures."""
+    found = sorted(FIG.glob("*error_map*.png"))
+    if not found:
+        print(f"  ! no error maps in {FIG}")
+        return []
+    run = CFG["demo_run"]
+    pref = [p for p in found if run in p.name] or found
+    ours = [p for p in pref if "baseline" not in p.name.lower()][:1]
+    base = [p for p in pref if "baseline" in p.name.lower()][:1]
+    return ours + base
 
 
 ARCH = """Browser ──► Vercel (React + MapLibre)
@@ -1088,7 +1489,13 @@ def record(picked: list[int], headed: bool, real_run: bool, voice: str):
             if not text:
                 return 0.2
             v = STORY_VOICE_NE if lang.lower().startswith("ne") else voice
-            h = hashlib.sha1(f"{ENGINE}|{v}|{RATE}|{text}".encode()).hexdigest()[:12]
+            vk = os.environ.get("ELEVEN_VOICE_ID", "") if ENGINE == "eleven" else v
+            if ENGINE == "sarvam":
+                vk = v + os.environ.get("SARVAM_SPEAKER", "karun") + os.environ.get("SARVAM_MODEL", "bulbul:v2")
+            if ENGINE == "own":
+                mv = MYVOICE / f"{own_key(spoken(text))}.wav"
+                vk = f"own{mv.stat().st_mtime if mv.exists() else 0}"
+            h = hashlib.sha1(f"{ENGINE}|{vk}|{RATE}|{text}".encode()).hexdigest()[:12]
             path = OUT / "audio" / f"story_{h}.mp3"
             if not path.exists():
                 pool.submit(lambda: asyncio.run(_tts(spoken(text), path, v))).result()
@@ -1142,7 +1549,8 @@ def record(picked: list[int], headed: bool, real_run: bool, voice: str):
         time.sleep(1.0)
 
         video = page.video
-        ctx.close()
+        ctx.close()                                 # this finishes writing the video file
+        video_path = Path(video.path())             # read it before Playwright stops
         br.close()
     pool.shutdown()
     story_cues = []
@@ -1151,7 +1559,7 @@ def record(picked: list[int], headed: bool, real_run: bool, voice: str):
         length = (cut - t) if cut else d
         if length > 0.1:
             story_cues.append((start, path, text, min(d, length)))
-    return Path(video.path()), trim, cues, end, story_cues
+    return video_path, trim, cues, end, story_cues
 
 
 # ---------------------------------------------------------------- subtitles + mix
@@ -1215,9 +1623,17 @@ def main() -> None:
     ap.add_argument("--short", action="store_true", help="skip optional scenes 11, 12, 14")
     ap.add_argument("--new-run", action="store_true", help="scene 12 really starts and stops a run")
     ap.add_argument("--voice", default=VOICE)
+    ap.add_argument("--export-script", action="store_true", help="write video_out/voice_script.txt to read")
+    ap.add_argument("--import-voice", default="", help="one long recording of the script, to cut into lines")
+    ap.add_argument("--silent", action="store_true", help="no narration in the final video (music only)")
+    ap.add_argument("--record-voice", action="store_true", help="read each line into your mic (teleprompter)")
+    ap.add_argument("--redo", action="store_true", help="with --record-voice: record every line again")
+    ap.add_argument("--remix", action="store_true", help="rebuild sound and video from the last recording")
     ap.add_argument("--no-music", action="store_true", help="no background drone")
-    ap.add_argument("--engine", choices=["auto", "edge", "gtts"], default="auto",
-                    help="voice engine: auto (default), edge (Microsoft), gtts (Google)")
+    ap.add_argument("--engine", choices=["auto", "own", "edge", "azure", "sarvam", "eleven", "gtts", "gtts-male", "sapi", "piper"], default="auto",
+                    help="voice: auto, edge (Microsoft Indian male), gtts (Indian female), "
+                         "gtts-male (Indian accent, made deeper), sapi (Windows Ravi, Indian male), "
+                         "piper (offline US male)")
     args = ap.parse_args()
 
     for tool in ("ffmpeg", "ffprobe"):
@@ -1226,6 +1642,15 @@ def main() -> None:
 
     if args.probe:
         probe(args.headed)
+        return
+    if args.record_voice:
+        record_voice(args.redo)
+        return
+    if args.export_script:
+        print(f"Script written: {export_script()}")
+        return
+    if args.import_voice:
+        import_voice(Path(args.import_voice))
         return
 
     global MUSIC, ENGINE
@@ -1240,18 +1665,35 @@ def main() -> None:
         pick_engine(args.voice)
     else:
         ENGINE = args.engine
-    if ENGINE == "gtts":
+    if ENGINE in ("gtts", "gtts-male", "sapi", "eleven", "own"):
         try:
             import gtts  # noqa: F401
         except ImportError:
             sys.exit("Google voice needs one package. Run:  pip install gTTS")
+    if ENGINE == "piper":
+        try:
+            import piper  # noqa: F401
+        except ImportError:
+            sys.exit("The offline male voice needs one package. Run:  pip install piper-tts")
     print("Making the voice...")
     audio = make_voice([(s, texts[s]) for s in picked], args.voice)
     durs = {s: v[1] for s, v in audio.items()}
     record._durs = durs
 
     print("Recording...")
-    video, trim, cues, end, story = record(picked, args.headed, args.new_run, args.voice)
+    take = OUT / "take.json"
+    if args.remix and take.exists():
+        t = json.loads(take.read_text(encoding="utf-8"))
+        video, trim, end = Path(t["video"]), t["trim"], t["end"]
+        cues = [tuple(c) for c in t["cues"]]
+        story = [(a, Path(b), c, d) for a, b, c, d in t["story"]]
+        picked = [sid for sid, _ in cues]
+        audio = make_voice([(s, texts[s]) for s in picked], args.voice)
+        print("Using the saved recording (no new browser run).")
+    else:
+        video, trim, cues, end, story = record(picked, args.headed, args.new_run, args.voice)
+        take.write_text(json.dumps({"video": str(video), "trim": trim, "end": end, "cues": cues,
+                                    "story": [(a, str(b), c, d) for a, b, c, d in story]}), encoding="utf-8")
 
     clips, rows = [], []
     for sid, start in cues:
@@ -1268,6 +1710,12 @@ def main() -> None:
     srt = OUT / "sampark_demo.srt"
     write_srt(rows, srt)
     out = OUT / "sampark_demo.mp4"
+    if args.silent:
+        silence = OUT / "audio" / "_silence.wav"
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono",
+                        "-t", "1", str(silence)], check=True)
+        clips = [(silence, 0, 1.0)]
+        out = OUT / "sampark_demo_silent.mp4"
     print("Mixing...")
     mix(video, trim, clips, end, srt, out)
     print(f"\nDone: {out}  ({end/60:.1f} min)\nSubtitles: {srt}")
